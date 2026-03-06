@@ -189,6 +189,9 @@ class F1NotifierPlugin(Star):
                         yield event.plain_result(
                             fmt.format_practice_result(of1_session, results, drivers_by_num, normalized)
                         )
+                    case (Success(), Failure(error=err)):
+                        logger.error(f"[F1Notifier] /f1 practice drivers error: {err}")
+                        yield event.plain_result("❌ 获取练习赛车手数据失败，请稍后重试。")
                     case (Success(), _):
                         yield event.plain_result(f"⏳ FP{normalized} 结果数据暂未就绪，请练习赛结束后再试。")
                     case (Failure(error=err), _):

@@ -254,6 +254,10 @@ class F1Scheduler:
                                     await self._broadcast(msg)
                                     await self._mark_notified(round_num, event_key)
                                     logger.info(f"[F1Notifier] Sent {event_key} for round {round_num}")
+                                case (Failure(error=err), _):
+                                    logger.warning(f"[F1Notifier] Failed to fetch FP{fp_num} results: {err}")
+                                case (_, Failure(error=err)):
+                                    logger.warning(f"[F1Notifier] Failed to fetch FP{fp_num} drivers: {err}")
                                 case _:
                                     logger.debug(f"[F1Notifier] FP{fp_num} results not ready yet")
                         case Failure(error=err):

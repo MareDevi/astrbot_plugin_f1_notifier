@@ -35,7 +35,9 @@ POLL_INTERVAL = 60          # seconds
 WEEKEND_START_THRESHOLD = timedelta(hours=24)  # notify 24 h before first session
 PRE_RACE_THRESHOLD = timedelta(minutes=30)     # notify 30 min before race
 
-_DEFAULT_STATE = {"last_notified_round": 0, "notified_events": []}
+def _default_state() -> dict:
+    """Factory function to create a fresh default state dict."""
+    return {"last_notified_round": 0, "notified_events": []}
 
 
 class F1Scheduler:
@@ -45,7 +47,7 @@ class F1Scheduler:
         self.ctx = context
         self._star = star
         self._subscribers: list[str] = []
-        self._state: dict = dict(_DEFAULT_STATE)
+        self._state: dict = _default_state()
         self._task: asyncio.Task | None = None
         self._loaded = False
 
@@ -90,7 +92,7 @@ class F1Scheduler:
     async def _load(self) -> None:
         """Load subscribers and state from AstrBot KV store."""
         self._subscribers = await self._star.get_kv_data("f1_subscribers", []) or []
-        self._state = await self._star.get_kv_data("f1_state", dict(_DEFAULT_STATE)) or dict(_DEFAULT_STATE)
+        self._state = await self._star.get_kv_data("f1_state", _default_state()) or _default_state()
         self._loaded = True
         logger.info(
             f"[F1Notifier] Loaded {len(self._subscribers)} subscriber(s) from KV store."
@@ -149,7 +151,7 @@ class F1Scheduler:
             try:
                 if F1Scheduler._parse_utc(race.date, race.time) >= now:
                     return race
-            except Exception:
+            except ValueError:
                 continue
         return None
 
@@ -169,7 +171,7 @@ class F1Scheduler:
             if slot is not None:
                 try:
                     times.append(F1Scheduler._parse_utc(slot.date, slot.time))
-                except Exception:
+                except ValueError:
                     continue
         return min(times) if times else None
 
@@ -246,6 +248,15 @@ class F1Scheduler:
                     session_res = await api.get_practice_session(fp_num)
                     match session_res:
                         case Success(value=of1_session):
+                            # Validate session belongs to current race weekend
+                            expected_country = next_race.circuit.location.country
+                            if of1_session.country_name != expected_country:
+                                logger.debug(
+                                    f"[F1Notifier] FP{fp_num} session country "
+                                    f"'{of1_session.country_name}' does not match "
+                                    f"expected '{expected_country}', skipping"
+                                )
+                                continue
                             sk = of1_session.session_key
                             results_res = await api.get_session_result(sk)
                             drivers_res = await api.get_drivers_for_session(sk)

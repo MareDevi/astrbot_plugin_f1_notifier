@@ -1,4 +1,4 @@
-## [unreleased]
+## [1.0.2] - 2026-03-06
 
 ### 🚀 Features
 
@@ -7,6 +7,7 @@
 - Implement Pydantic models for F1 API responses and refactor scheduler
 - Enhance race schedule formatting to include all session times
 - Add F1 notification plugin with models, formatter, and scheduler
+- Update CHANGELOG and version to 1.0.2; refactor imports and improve error handling in API and scheduler
 
 ### 🐛 Bug Fixes
 

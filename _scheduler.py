@@ -25,6 +25,7 @@ from astrbot.api import logger
 
 from . import _f1_api as api
 from . import _formatter as fmt
+from ._models import Success, Failure, JolpicaRace, JolpicaSessionSchedule
 
 if TYPE_CHECKING:
     from astrbot.core.star.context import Context
@@ -42,8 +43,8 @@ class F1Scheduler:
 
     def __init__(self, star: "Star", context: "Context") -> None:
         self.ctx = context
-        self._star = star                     # used for KV storage
-        self._subscribers: list[str] = []    # loaded async in start()
+        self._star = star
+        self._subscribers: list[str] = []
         self._state: dict = dict(_DEFAULT_STATE)
         self._task: asyncio.Task | None = None
         self._loaded = False
@@ -88,8 +89,8 @@ class F1Scheduler:
 
     async def _load(self) -> None:
         """Load subscribers and state from AstrBot KV store."""
-        self._subscribers = await self._star.get_kv_data("f1_subscribers") or []
-        self._state = await self._star.get_kv_data("f1_state") or dict(_DEFAULT_STATE)
+        self._subscribers = await self._star.get_kv_data("f1_subscribers", []) or []
+        self._state = await self._star.get_kv_data("f1_state", dict(_DEFAULT_STATE)) or dict(_DEFAULT_STATE)
         self._loaded = True
         logger.info(
             f"[F1Notifier] Loaded {len(self._subscribers)} subscriber(s) from KV store."
@@ -142,31 +143,39 @@ class F1Scheduler:
         ).replace(tzinfo=timezone.utc)
 
     @staticmethod
-    def _next_race(races: list[dict]) -> dict | None:
+    def _next_race(races: list[JolpicaRace]) -> JolpicaRace | None:
         now = datetime.now(timezone.utc)
-        for r in races:
-            if F1Scheduler._parse_utc(r["date"], r["time"]) >= now:
-                return r
+        for race in races:
+            try:
+                if F1Scheduler._parse_utc(race.date, race.time) >= now:
+                    return race
+            except Exception:
+                continue
         return None
 
     @staticmethod
-    def _first_session_time(race: dict) -> datetime | None:
+    def _first_session_time(race: JolpicaRace) -> datetime | None:
         """Find the earliest session start time in the weekend."""
-        keys = ["FirstPractice", "SprintQualifying", "SecondPractice",
-                "Sprint", "ThirdPractice", "Qualifying"]
-        times = []
-        for key in keys:
-            s = race.get(key)
-            if s:
-                times.append(F1Scheduler._parse_utc(s["date"], s["time"]))
-        if not times:
-            return None
-        return min(times)
+        slots: list[JolpicaSessionSchedule | None] = [
+            race.first_practice,
+            race.sprint_qualifying,
+            race.second_practice,
+            race.sprint,
+            race.third_practice,
+            race.qualifying,
+        ]
+        times: list[datetime] = []
+        for slot in slots:
+            if slot is not None:
+                try:
+                    times.append(F1Scheduler._parse_utc(slot.date, slot.time))
+                except Exception:
+                    continue
+        return min(times) if times else None
 
     # ──────────────── main loop ────────────────
 
     async def _run(self) -> None:
-        # Load persisted data before entering the loop
         await self._load()
         while True:
             try:
@@ -179,22 +188,29 @@ class F1Scheduler:
 
     async def _check_and_notify(self) -> None:
         if not self._subscribers:
-            return  # No-op if nobody subscribed
+            return
 
-        races = await api.get_current_schedule()
+        schedule_result = await api.get_current_schedule()
+        match schedule_result:
+            case Failure(error=err):
+                logger.warning(f"[F1Notifier] Schedule fetch failed: {err}")
+                return
+            case Success(value=races):
+                pass
+
         if not races:
             return
 
         now = datetime.now(timezone.utc)
         next_race = self._next_race(races)
 
-        if next_race:
-            round_num = int(next_race["round"])
-            race_time = self._parse_utc(next_race["date"], next_race["time"])
+        if next_race is not None:
+            round_num = next_race.round_int
+            race_time = self._parse_utc(next_race.date, next_race.time)
 
             # ── 1. Weekend start notification ──────────────────────────────
             first_session = self._first_session_time(next_race)
-            if first_session:
+            if first_session is not None:
                 delta = first_session - now
                 if timedelta(0) <= delta <= WEEKEND_START_THRESHOLD:
                     if not self._notified(round_num, "weekend_start"):
@@ -205,106 +221,108 @@ class F1Scheduler:
 
             # ── 2. Practice session result push ───────────────────────────
             fp_sessions = [
-                ("FirstPractice",  "1", "fp1_result"),
-                ("SecondPractice", "2", "fp2_result"),
-                ("ThirdPractice",  "3", "fp3_result"),
+                (next_race.first_practice,  "1", "fp1_result"),
+                (next_race.second_practice, "2", "fp2_result"),
+                (next_race.third_practice,  "3", "fp3_result"),
             ]
-            for sched_key, fp_num, event_key in fp_sessions:
-                fp_sched = next_race.get(sched_key)
-                if not fp_sched:
+            for fp_slot, fp_num, event_key in fp_sessions:
+                if fp_slot is None:
                     continue
-                fp_time = self._parse_utc(fp_sched["date"], fp_sched["time"])
-                # FP sessions last ~60 min; push 90 min after start
+                fp_time = self._parse_utc(fp_slot.date, fp_slot.time)
                 if now > fp_time + timedelta(minutes=90):
                     if not self._notified(round_num, event_key):
-                        try:
-                            of1_session = await api.get_practice_session(fp_num)
-                            if of1_session:
-                                sk = of1_session["session_key"]
-                                results = await api.get_session_result(sk)
-                                drivers_list = await api.get_drivers_for_session(sk)
-                                drivers_by_num = {d["driver_number"]: d for d in drivers_list}
-                                if results:
-                                    msg = fmt.format_practice_result(
-                                        of1_session, results, drivers_by_num, fp_num
-                                    )
-                                    await self._broadcast(msg)
-                                    await self._mark_notified(round_num, event_key)
-                                    logger.info(f"[F1Notifier] Sent {event_key} for round {round_num}")
-                        except Exception as e:
-                            logger.warning(f"[F1Notifier] FP{fp_num} result not ready: {e}")
+                        session_res = await api.get_practice_session(fp_num)
+                        match session_res:
+                            case Success(value=of1_session):
+                                sk = of1_session.session_key
+                                results_res = await api.get_session_result(sk)
+                                drivers_res = await api.get_drivers_for_session(sk)
+                                match (results_res, drivers_res):
+                                    case (Success(value=results), Success(value=drivers_list)) if results:
+                                        drivers_by_num = {d.driver_number: d for d in drivers_list}
+                                        msg = fmt.format_practice_result(
+                                            of1_session, results, drivers_by_num, fp_num
+                                        )
+                                        await self._broadcast(msg)
+                                        await self._mark_notified(round_num, event_key)
+                                        logger.info(f"[F1Notifier] Sent {event_key} for round {round_num}")
+                                    case _:
+                                        logger.debug(f"[F1Notifier] FP{fp_num} results not ready yet")
+                            case Failure(error=err):
+                                logger.warning(f"[F1Notifier] FP{fp_num} session not found: {err}")
 
             # ── 3. Qualifying result push ──────────────────────────────────
-            qual = next_race.get("Qualifying")
-            if qual:
-                qual_time = self._parse_utc(qual["date"], qual["time"])
-                # Push ~2 h after qualifying session ends
+            if next_race.qualifying is not None:
+                qual_time = self._parse_utc(next_race.qualifying.date, next_race.qualifying.time)
                 if now > qual_time + timedelta(hours=2):
                     if not self._notified(round_num, "qualifying_result"):
-                        try:
-                            result = await api.get_qualifying_result(round_num)
-                            if result and result.get("QualifyingResults"):
-                                msg = fmt.format_qualifying_result(result)
+                        qual_res = await api.get_qualifying_result(round_num)
+                        match qual_res:
+                            case Success(value=race) if race.qualifying_results:
+                                msg = fmt.format_qualifying_result(race)
                                 await self._broadcast(msg)
                                 await self._mark_notified(round_num, "qualifying_result")
                                 logger.info(f"[F1Notifier] Sent qualifying_result for round {round_num}")
-                        except Exception as e:
-                            logger.warning(f"[F1Notifier] Qualifying result not ready: {e}")
+                            case Failure(error=err):
+                                logger.warning(f"[F1Notifier] Qualifying result not ready: {err}")
 
             # ── 4. Pre-race starting grid push ────────────────────────────
             delta_race = race_time - now
             if timedelta(0) <= delta_race <= PRE_RACE_THRESHOLD:
                 if not self._notified(round_num, "pre_race"):
-                    try:
-                        session = await api.get_latest_session("Race")
-                        if session:
-                            sk = session["session_key"]
-                            drivers_list = await api.get_drivers_for_session(sk)
-                            grid = await api.get_starting_grid(sk)
-                            drivers_by_num = {d["driver_number"]: d for d in drivers_list}
-                            if grid:
-                                msg = fmt.format_starting_grid(drivers_by_num, grid)
-                            else:
-                                msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
-                        else:
+                    session_res = await api.get_latest_session("Race")
+                    match session_res:
+                        case Success(value=session):
+                            sk = session.session_key
+                            drivers_res = await api.get_drivers_for_session(sk)
+                            grid_res = await api.get_starting_grid(sk)
+                            match (drivers_res, grid_res):
+                                case (Success(value=drivers_list), Success(value=grid)) if grid:
+                                    drivers_by_num = {d.driver_number: d for d in drivers_list}
+                                    msg = fmt.format_starting_grid(drivers_by_num, grid)
+                                case _:
+                                    msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
+                        case Failure():
                             msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
-                        await self._broadcast(msg)
-                        await self._mark_notified(round_num, "pre_race")
-                        logger.info(f"[F1Notifier] Sent pre_race for round {round_num}")
-                    except Exception as e:
-                        logger.warning(f"[F1Notifier] Pre-race grid error: {e}")
+                    await self._broadcast(msg)
+                    await self._mark_notified(round_num, "pre_race")
+                    logger.info(f"[F1Notifier] Sent pre_race for round {round_num}")
 
-        # ── 5. Race result push (check most recently finished race) ────────
+        # ── 5. Race result push (most recently finished race) ──────────────
         finished = [
             r for r in races
-            if self._parse_utc(r["date"], r["time"]) + timedelta(hours=3) < now
+            if (
+                (dt := fmt.race_utc(r)) is not None
+                and dt + timedelta(hours=3) < now
+            )
         ]
         if finished:
             latest_finished = finished[-1]
-            lf_round = int(latest_finished["round"])
+            lf_round = latest_finished.round_int
             if not self._notified(lf_round, "race_result"):
-                try:
-                    result = await api.get_race_result(lf_round)
-                    if result and result.get("Results"):
-                        msg = fmt.format_race_result(result)
+                race_res = await api.get_race_result(lf_round)
+                match race_res:
+                    case Success(value=race) if race.race_results:
+                        msg = fmt.format_race_result(race)
                         await self._broadcast(msg)
                         await self._mark_notified(lf_round, "race_result")
                         logger.info(f"[F1Notifier] Sent race_result for round {lf_round}")
-                except Exception as e:
-                    logger.warning(f"[F1Notifier] Race result not ready: {e}")
+                    case Failure(error=err):
+                        logger.warning(f"[F1Notifier] Race result not ready: {err}")
 
             # ── 6. Sprint result push ──────────────────────────────────────
-            sprint = latest_finished.get("Sprint")
-            if sprint:
-                sprint_time = self._parse_utc(sprint["date"], sprint["time"])
+            if latest_finished.sprint is not None:
+                sprint_time = self._parse_utc(
+                    latest_finished.sprint.date, latest_finished.sprint.time
+                )
                 if now > sprint_time + timedelta(hours=2):
                     if not self._notified(lf_round, "sprint_result"):
-                        try:
-                            result = await api.get_sprint_result(lf_round)
-                            if result and result.get("SprintResults"):
-                                msg = fmt.format_sprint_result(result)
+                        sprint_res = await api.get_sprint_result(lf_round)
+                        match sprint_res:
+                            case Success(value=race) if race.sprint_results:
+                                msg = fmt.format_sprint_result(race)
                                 await self._broadcast(msg)
                                 await self._mark_notified(lf_round, "sprint_result")
                                 logger.info(f"[F1Notifier] Sent sprint_result for round {lf_round}")
-                        except Exception as e:
-                            logger.warning(f"[F1Notifier] Sprint result not ready: {e}")
+                            case Failure(error=err):
+                                logger.warning(f"[F1Notifier] Sprint result not ready: {err}")

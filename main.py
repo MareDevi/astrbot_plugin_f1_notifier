@@ -9,6 +9,7 @@ Commands (prefix /f1):
   /f1 result [round]     — race result (default: latest)
   /f1 qualifying [round] — qualifying result (default: latest)
   /f1 sprint [round]     — sprint race result
+  /f1 practice [1|2|3]   — practice session fastest laps
   /f1 standings drivers  — driver championship standings
   /f1 standings teams    — constructor standings
   /f1 subscribe          — subscribe to auto notifications
@@ -23,8 +24,11 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
+import asyncio as _asyncio
+
 from . import _f1_api as api
 from . import _formatter as fmt
+from ._models import Success, Failure
 from ._scheduler import F1Scheduler
 
 HELP_TEXT = """🏎 F1 Notifier 指令列表
@@ -88,123 +92,132 @@ class F1NotifierPlugin(Star):
     @f1.command("schedule")
     async def f1_schedule(self, event: AstrMessageEvent):
         """查看近期赛程（最近5站）"""
-        try:
-            races = await api.get_current_schedule()
-            yield event.plain_result(fmt.format_schedule(races))
-        except Exception as e:
-            logger.error(f"[F1Notifier] /f1 schedule error: {e}")
-            yield event.plain_result("❌ 获取赛程失败，请稍后重试。")
+        result = await api.get_current_schedule()
+        match result:
+            case Success(value=races):
+                yield event.plain_result(fmt.format_schedule(races))
+            case Failure(error=err):
+                logger.error(f"[F1Notifier] /f1 schedule error: {err}")
+                yield event.plain_result("❌ 获取赛程失败，请稍后重试。")
 
     @f1.command("next")
     async def f1_next(self, event: AstrMessageEvent):
         """查看下一站完整时间表"""
-        try:
-            races = await api.get_current_schedule()
-            now = datetime.now(timezone.utc)
-            next_race = None
-            for r in races:
-                date_str = r.get("date")
-                time_str = r.get("time")
-                if not date_str or not time_str:
-                    continue
-                try:
-                    race_dt = datetime.fromisoformat(
-                        f"{date_str}T{time_str.rstrip('Z')}+00:00"
-                    )
-                except (ValueError, TypeError):
-                    continue
-                if race_dt >= now:
-                    next_race = r
-                    break
-            if not next_race:
-                yield event.plain_result("📅 本赛季剩余赛程已全部完成，期待下赛季！")
-            else:
-                yield event.plain_result(fmt.format_next_race(next_race))
-        except Exception as e:
-            logger.error(f"[F1Notifier] /f1 next error: {e}")
-            yield event.plain_result("❌ 获取下一站信息失败，请稍后重试。")
+        result = await api.get_current_schedule()
+        match result:
+            case Success(value=races):
+                now = datetime.now(timezone.utc)
+                next_race = None
+                for race in races:
+                    dt = fmt.race_utc(race)
+                    if dt is not None and dt >= now:
+                        next_race = race
+                        break
+                if next_race is None:
+                    yield event.plain_result("📅 本赛季剩余赛程已全部完成，期待下赛季！")
+                else:
+                    yield event.plain_result(fmt.format_next_race(next_race))
+            case Failure(error=err):
+                logger.error(f"[F1Notifier] /f1 next error: {err}")
+                yield event.plain_result("❌ 获取下一站信息失败，请稍后重试。")
 
     @f1.command("result")
     async def f1_result(self, event: AstrMessageEvent, round: str = "last"):
         """查看正赛结果，可指定站次 round"""
         round_arg: int | str = int(round) if round.isdigit() else "last"
-        try:
-            result = await api.get_race_result(round_arg)
-            if not result or not result.get("Results"):
+        result = await api.get_race_result(round_arg)
+        match result:
+            case Success(value=race) if race.race_results:
+                yield event.plain_result(fmt.format_race_result(race))
+            case Success():
                 yield event.plain_result("⏳ 正赛结果暂未公布，请比赛结束后再试。")
-                return
-            yield event.plain_result(fmt.format_race_result(result))
-        except Exception as e:
-            logger.error(f"[F1Notifier] /f1 result error: {e}")
-            yield event.plain_result("❌ 获取比赛结果失败，请稍后重试。")
+            case Failure(error=err):
+                logger.error(f"[F1Notifier] /f1 result error: {err}")
+                yield event.plain_result("❌ 获取比赛结果失败，请稍后重试。")
 
     @f1.command("qualifying")
     async def f1_qualifying(self, event: AstrMessageEvent, round: str = "last"):
         """查看排位赛结果，可指定站次 round"""
         round_arg: int | str = int(round) if round.isdigit() else "last"
-        try:
-            result = await api.get_qualifying_result(round_arg)
-            if not result or not result.get("QualifyingResults"):
+        result = await api.get_qualifying_result(round_arg)
+        match result:
+            case Success(value=race) if race.qualifying_results:
+                yield event.plain_result(fmt.format_qualifying_result(race))
+            case Success():
                 yield event.plain_result("⏳ 排位赛结果暂未公布，请稍后再试。")
-                return
-            yield event.plain_result(fmt.format_qualifying_result(result))
-        except Exception as e:
-            logger.error(f"[F1Notifier] /f1 qualifying error: {e}")
-            yield event.plain_result("❌ 获取排位赛结果失败，请稍后重试。")
+            case Failure(error=err):
+                logger.error(f"[F1Notifier] /f1 qualifying error: {err}")
+                yield event.plain_result("❌ 获取排位赛结果失败，请稍后重试。")
 
     @f1.command("sprint")
     async def f1_sprint(self, event: AstrMessageEvent, round: str = "last"):
         """查看冲刺赛结果，可指定站次 round"""
         round_arg: int | str = int(round) if round.isdigit() else "last"
-        try:
-            result = await api.get_sprint_result(round_arg)
-            if not result or not result.get("SprintResults"):
+        result = await api.get_sprint_result(round_arg)
+        match result:
+            case Success(value=race) if race.sprint_results:
+                yield event.plain_result(fmt.format_sprint_result(race))
+            case Success():
                 yield event.plain_result("⏳ 冲刺赛结果暂未公布，或该站无冲刺赛。")
-                return
-            yield event.plain_result(fmt.format_sprint_result(result))
-        except Exception as e:
-            logger.error(f"[F1Notifier] /f1 sprint error: {e}")
-            yield event.plain_result("❌ 获取冲刺赛结果失败，请稍后重试。")
+            case Failure(error=err):
+                logger.error(f"[F1Notifier] /f1 sprint error: {err}")
+                yield event.plain_result("❌ 获取冲刺赛结果失败，请稍后重试。")
 
     @f1.command("practice")
     async def f1_practice(self, event: AstrMessageEvent, session: str = "1"):
         """查看练习赛最快圈速。session: 1/2/3（默认1，也可输入 fp1/fp2/fp3）"""
-        normalized = session.lower().removeprefix("fp") or "1"  # 'fp1' → '1', '1' → '1'
+        normalized = session.lower().removeprefix("fp") or "1"
         if normalized not in ("1", "2", "3"):
             yield event.plain_result("❌ 请输入有效的练习赛场次：1、2、或 3（如 /f1 practice 2）")
             return
-        try:
-            of1_session = await api.get_practice_session(normalized)
-            if not of1_session:
+
+        session_result = await api.get_practice_session(normalized)
+        match session_result:
+            case Failure(error=err):
+                logger.warning(f"[F1Notifier] /f1 practice session lookup: {err}")
                 yield event.plain_result(f"⏳ 暂未找到 FP{normalized} 练习赛数据，请练习赛结束后再试。")
                 return
-            sk = of1_session["session_key"]
-            results = await api.get_session_result(sk)
-            drivers_list = await api.get_drivers_for_session(sk)
-            drivers_by_num = {d["driver_number"]: d for d in drivers_list}
-            if not results:
+            case Success(value=of1_session):
+                pass
+
+        sk = of1_session.session_key
+        results_result, drivers_result = await _gather(
+            api.get_session_result(sk),
+            api.get_drivers_for_session(sk),
+        )
+
+        match (results_result, drivers_result):
+            case (Success(value=results), Success(value=drivers_list)) if results:
+                drivers_by_num = {d.driver_number: d for d in drivers_list}
+                yield event.plain_result(
+                    fmt.format_practice_result(of1_session, results, drivers_by_num, normalized)
+                )
+            case (Success(), _):
                 yield event.plain_result(f"⏳ FP{normalized} 结果数据暂未就绪，请练习赛结束后再试。")
-                return
-            yield event.plain_result(
-                fmt.format_practice_result(of1_session, results, drivers_by_num, normalized)
-            )
-        except Exception as e:
-            logger.error(f"[F1Notifier] /f1 practice error: {e}")
-            yield event.plain_result("❌ 获取练习赛数据失败，请稍后重试。")
+            case (Failure(error=err), _):
+                logger.error(f"[F1Notifier] /f1 practice error: {err}")
+                yield event.plain_result("❌ 获取练习赛数据失败，请稍后重试。")
 
     @f1.command("standings")
     async def f1_standings(self, event: AstrMessageEvent, type: str = "drivers"):
         """查看积分榜。type: drivers（默认）或 teams"""
-        try:
-            if type.lower() in ("teams", "constructors", "team", "车队"):
-                standings = await api.get_constructor_standings()
-                yield event.plain_result(fmt.format_constructor_standings(standings))
-            else:
-                standings = await api.get_driver_standings()
-                yield event.plain_result(fmt.format_driver_standings(standings))
-        except Exception as e:
-            logger.error(f"[F1Notifier] /f1 standings error: {e}")
-            yield event.plain_result("❌ 获取积分榜失败，请稍后重试。")
+        match type.lower():
+            case "teams" | "constructors" | "team" | "车队":
+                result = await api.get_constructor_standings()
+                match result:
+                    case Success(value=standings):
+                        yield event.plain_result(fmt.format_constructor_standings(standings))
+                    case Failure(error=err):
+                        logger.error(f"[F1Notifier] /f1 standings teams error: {err}")
+                        yield event.plain_result("❌ 获取车队积分榜失败，请稍后重试。")
+            case _:
+                result = await api.get_driver_standings()
+                match result:
+                    case Success(value=standings):
+                        yield event.plain_result(fmt.format_driver_standings(standings))
+                    case Failure(error=err):
+                        logger.error(f"[F1Notifier] /f1 standings drivers error: {err}")
+                        yield event.plain_result("❌ 获取车手积分榜失败，请稍后重试。")
 
     @f1.command("subscribe")
     async def f1_subscribe(self, event: AstrMessageEvent):
@@ -239,21 +252,18 @@ class F1NotifierPlugin(Star):
         results: list[tuple[str, bool, str]] = []  # (name, ok, detail)
 
         async def run(name: str, coro):
-            try:
-                val = await coro
-                ok = bool(val)
-                if ok:
-                    if isinstance(val, list):
-                        detail = f"✅ {len(val)} 条记录"
-                    elif isinstance(val, dict):
-                        detail = f"✅ {val.get('raceName') or val.get('Driver', {}).get('familyName', 'OK')}"
-                    else:
-                        detail = "✅"
-                else:
-                    detail = "⚠️ 无数据（可能尚未举行）"
-                results.append((name, ok, detail))
-            except Exception as e:
-                results.append((name, False, f"❌ {e}"))
+            r = await coro
+            match r:
+                case Success(value=val):
+                    match val:
+                        case [*items]:
+                            results.append((name, True, f"✅ {len(items)} 条记录"))
+                        case obj:
+                            label = getattr(obj, "race_name", None) or getattr(obj, "driver", None)
+                            detail = f"✅ {label}" if label else "✅"
+                            results.append((name, True, detail))
+                case Failure(error=err):
+                    results.append((name, False, f"❌ {err}"))
 
         # Jolpica tests
         await run("赛程",         api.get_current_schedule(yr))
@@ -266,20 +276,24 @@ class F1NotifierPlugin(Star):
         # OpenF1 tests
         async def _fp_test():
             s = await api.get_practice_session("1", yr)
-            if not s:
-                return None
-            return await api.get_session_result(s["session_key"])
+            match s:
+                case Success(value=session):
+                    return await api.get_session_result(session.session_key)
+                case Failure() as f:
+                    return f
 
-        await run("练习赛(FP1)",  _fp_test())
+        await run("练习赛(FP1)", _fp_test())
 
         lines = [f"📋 F1 插件测试报告 ({yr} 赛季)\n"]
-        passed = 0
+        passed = sum(1 for _, ok, _ in results if ok)
         for name, ok, detail in results:
             lines.append(f"  {'✅' if ok else '❌'} {name}: {detail}")
-            if ok:
-                passed += 1
-
         lines.append(f"\n共 {passed}/{len(results)} 项通过")
         yield event.plain_result("\n".join(lines))
 
 
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+async def _gather(*coros):
+    """Run coroutines concurrently and return results in order."""
+    return await _asyncio.gather(*coros)

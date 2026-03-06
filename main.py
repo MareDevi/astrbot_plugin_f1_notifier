@@ -24,7 +24,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-import asyncio as _asyncio
+import asyncio
 
 from .src.astrbot_plugin_f1_notifier import api
 from .src.astrbot_plugin_f1_notifier import formatter as fmt
@@ -179,7 +179,7 @@ class F1NotifierPlugin(Star):
                 return
             case Success(value=of1_session):
                 sk = of1_session.session_key
-                results_result, drivers_result = await _gather(
+                results_result, drivers_result = await asyncio.gather(
                     api.get_session_result(sk),
                     api.get_drivers_for_session(sk),
                 )
@@ -249,31 +249,21 @@ class F1NotifierPlugin(Star):
         yr = int(season) if season.isdigit() else 2025
         yield event.plain_result(f"🔧 正在测试 {yr} 赛季数据，请稍候...")
 
-        results: list[tuple[str, bool, str]] = []  # (name, ok, detail)
-
-        async def run(name: str, coro):
+        async def run(name: str, coro) -> tuple[str, bool, str]:
             r = await coro
             match r:
                 case Success(value=val):
                     match val:
                         case [*items]:
-                            results.append((name, True, f"✅ {len(items)} 条记录"))
+                            return (name, True, f"✅ {len(items)} 条记录")
                         case obj:
                             label = getattr(obj, "race_name", None) or getattr(obj, "driver", None)
                             detail = f"✅ {label}" if label else "✅"
-                            results.append((name, True, detail))
+                            return (name, True, detail)
                 case Failure(error=err):
-                    results.append((name, False, f"❌ {err}"))
+                    return (name, False, f"❌ {err}")
+            return (name, False, "❌ unknown")
 
-        # Jolpica tests
-        await run("赛程",         api.get_current_schedule(yr))
-        await run("正赛结果(R1)", api.get_race_result(1, yr))
-        await run("排位(R1)",     api.get_qualifying_result(1, yr))
-        await run("冲刺(R5)",     api.get_sprint_result(5, yr))
-        await run("车手积分",     api.get_driver_standings(yr))
-        await run("车队积分",     api.get_constructor_standings(yr))
-
-        # OpenF1 tests
         async def _fp_test():
             s = await api.get_practice_session("1", yr)
             match s:
@@ -282,7 +272,15 @@ class F1NotifierPlugin(Star):
                 case Failure() as f:
                     return f
 
-        await run("练习赛(FP1)", _fp_test())
+        results: list[tuple[str, bool, str]] = list(await asyncio.gather(
+            run("赛程",         api.get_current_schedule(yr)),
+            run("正赛结果(R1)", api.get_race_result(1, yr)),
+            run("排位(R1)",     api.get_qualifying_result(1, yr)),
+            run("冲刺(R5)",     api.get_sprint_result(5, yr)),
+            run("车手积分",     api.get_driver_standings(yr)),
+            run("车队积分",     api.get_constructor_standings(yr)),
+            run("练习赛(FP1)", _fp_test()),
+        ))
 
         lines = [f"📋 F1 插件测试报告 ({yr} 赛季)\n"]
         passed = sum(1 for _, ok, _ in results if ok)
@@ -292,8 +290,3 @@ class F1NotifierPlugin(Star):
         yield event.plain_result("\n".join(lines))
 
 
-# ── helpers ────────────────────────────────────────────────────────────────────
-
-async def _gather(*coros):
-    """Run coroutines concurrently and return results in order."""
-    return await _asyncio.gather(*coros)

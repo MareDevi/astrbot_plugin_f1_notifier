@@ -56,22 +56,32 @@ def _session_time(race: dict, session: str) -> str | None:
 def format_schedule(races: list[dict], limit: int = 5) -> str:
     """Format upcoming race schedule."""
     now = datetime.now(timezone.utc)
-    upcoming = [
-        r for r in races
-        if datetime.fromisoformat(f"{r['date']}T{r['time'].rstrip('Z')}+00:00") >= now
-    ][:limit]
+    upcoming = []
+    for r in races:
+        date_str = r.get("date")
+        time_str = r.get("time")
+        if not date_str or not time_str:
+            continue
+        try:
+            race_dt = datetime.fromisoformat(f"{date_str}T{time_str.rstrip('Z')}+00:00")
+        except (ValueError, TypeError):
+            continue
+        if race_dt >= now:
+            upcoming.append(r)
+    upcoming = upcoming[:limit]
 
     if not upcoming:
         return "📅 本赛季剩余赛程已全部完成，期待下赛季！"
 
-    lines = [f"📅 F1 {upcoming[0]['season']} 赛季 · 近期赛程\n"]
-    for i, r in enumerate(upcoming, 1):
-        flag = _flag(r["Circuit"]["Location"]["country"])
-        race_time = _utc_to_cst(r["date"], r["time"])
+    lines = [f"📅 F1 {upcoming[0].get('season', '')} 赛季 · 近期赛程\n"]
+    for r in upcoming:
+        country = r.get("Circuit", {}).get("Location", {}).get("country", "")
+        flag = _flag(country)
+        race_time = _utc_to_cst(r.get("date", ""), r.get("time", ""))
         sprint_tag = " 🏃 冲刺赛周末" if r.get("Sprint") else ""
         lines.append(
-            f"  第{r['round']}站{sprint_tag}\n"
-            f"  {flag} {r['raceName']}\n"
+            f"  第{r.get('round', '?')}站{sprint_tag}\n"
+            f"  {flag} {r.get('raceName', '未知')}\n"
             f"  🏎 正赛: {race_time} (CST)\n"
         )
     return "\n".join(lines)
@@ -79,10 +89,11 @@ def format_schedule(races: list[dict], limit: int = 5) -> str:
 
 def format_next_race(race: dict) -> str:
     """Format full weekend timetable for the next race."""
-    flag = _flag(race["Circuit"]["Location"]["country"])
-    circuit = race["Circuit"]["circuitName"]
-    locality = race["Circuit"]["Location"]["locality"]
-    country = race["Circuit"]["Location"]["country"]
+    location = race.get("Circuit", {}).get("Location", {})
+    country = location.get("country", "")
+    flag = _flag(country)
+    circuit = race.get("Circuit", {}).get("circuitName", "未知赛道")
+    locality = location.get("locality", "")
 
     session_map = [
         ("FirstPractice",    "FP1"),
@@ -94,7 +105,7 @@ def format_next_race(race: dict) -> str:
     ]
 
     lines = [
-        f"🏎 第{race['round']}站 — {flag} {race['raceName']}",
+        f"🏎 第{race.get('round', '?')}站 — {flag} {race.get('raceName', '未知')}",
         f"📍 {circuit}, {locality}, {country}",
         "",
         "🗓 赛程安排 (北京时间 CST):",
@@ -104,24 +115,25 @@ def format_next_race(race: dict) -> str:
         if t:
             lines.append(f"  {label}: {t}")
 
-    race_time = _utc_to_cst(race["date"], race["time"])
+    race_time = _utc_to_cst(race.get("date", ""), race.get("time", ""))
     lines.append(f"  ✅ 正赛: {race_time}")
     return "\n".join(lines)
 
 
 def format_race_result(race: dict) -> str:
     """Format full race result."""
-    flag = _flag(race["Circuit"]["Location"]["country"])
+    country = race.get("Circuit", {}).get("Location", {}).get("country", "")
+    flag = _flag(country)
     lines = [
-        f"🏁 正赛结果 — {flag} {race['raceName']} (第{race['round']}站)",
+        f"🏁 正赛结果 — {flag} {race.get('raceName', '未知')} (第{race.get('round', '?')}站)",
         "",
     ]
     for res in race.get("Results", []):
-        pos = int(res["position"])
+        pos = int(res.get("position", 0))
         medal = POSITION_MEDALS.get(pos, f" {pos:>2}.")
-        drv = res["Driver"]
-        name = f"{drv['givenName']} {drv['familyName']}"
-        team = res["Constructor"]["name"]
+        drv = res.get("Driver", {})
+        name = f"{drv.get('givenName', '')} {drv.get('familyName', '未知')}"
+        team = res.get("Constructor", {}).get("name", "?")
         status = res.get("status", "")
         time_val = res.get("Time", {}).get("time", status)
         laps = res.get("laps", "?")
@@ -135,17 +147,18 @@ def format_race_result(race: dict) -> str:
 
 def format_qualifying_result(race: dict) -> str:
     """Format qualifying result."""
-    flag = _flag(race["Circuit"]["Location"]["country"])
+    country = race.get("Circuit", {}).get("Location", {}).get("country", "")
+    flag = _flag(country)
     lines = [
-        f"⏱ 排位赛结果 — {flag} {race['raceName']} (第{race['round']}站)",
+        f"⏱ 排位赛结果 — {flag} {race.get('raceName', '未知')} (第{race.get('round', '?')}站)",
         "",
     ]
     for res in race.get("QualifyingResults", []):
-        pos = int(res["position"])
+        pos = int(res.get("position", 0))
         medal = POSITION_MEDALS.get(pos, f" {pos:>2}.")
-        drv = res["Driver"]
-        name = f"{drv['givenName']} {drv['familyName']}"
-        team = res["Constructor"]["name"]
+        drv = res.get("Driver", {})
+        name = f"{drv.get('givenName', '')} {drv.get('familyName', '未知')}"
+        team = res.get("Constructor", {}).get("name", "?")
         q1 = res.get("Q1", "-")
         q2 = res.get("Q2", "-")
         q3 = res.get("Q3", "-")
@@ -158,17 +171,18 @@ def format_qualifying_result(race: dict) -> str:
 
 def format_sprint_result(race: dict) -> str:
     """Format sprint race result."""
-    flag = _flag(race["Circuit"]["Location"]["country"])
+    country = race.get("Circuit", {}).get("Location", {}).get("country", "")
+    flag = _flag(country)
     lines = [
-        f"🏃 冲刺赛结果 — {flag} {race['raceName']} (第{race['round']}站)",
+        f"🏃 冲刺赛结果 — {flag} {race.get('raceName', '未知')} (第{race.get('round', '?')}站)",
         "",
     ]
     for res in race.get("SprintResults", []):
-        pos = int(res["position"])
+        pos = int(res.get("position", 0))
         medal = POSITION_MEDALS.get(pos, f" {pos:>2}.")
-        drv = res["Driver"]
-        name = f"{drv['givenName']} {drv['familyName']}"
-        team = res["Constructor"]["name"]
+        drv = res.get("Driver", {})
+        name = f"{drv.get('givenName', '')} {drv.get('familyName', '未知')}"
+        team = res.get("Constructor", {}).get("name", "?")
         status = res.get("status", "")
         time_val = res.get("Time", {}).get("time", status)
         pts = res.get("points", "0")
@@ -183,12 +197,12 @@ def format_driver_standings(standings: list[dict], limit: int = 10) -> str:
     """Format driver championship standings."""
     lines = ["🏆 车手积分榜\n"]
     for entry in standings[:limit]:
-        pos = int(entry["position"])
+        pos = int(entry.get("position", 0))
         medal = POSITION_MEDALS.get(pos, f" {pos:>2}.")
-        drv = entry["Driver"]
-        name = f"{drv['givenName']} {drv['familyName']}"
-        team = entry["Constructors"][0]["name"] if entry.get("Constructors") else "?"
-        pts = entry["points"]
+        drv = entry.get("Driver", {})
+        name = f"{drv.get('givenName', '')} {drv.get('familyName', '未知')}"
+        team = entry.get("Constructors", [{}])[0].get("name", "?") if entry.get("Constructors") else "?"
+        pts = entry.get("points", "0")
         wins = entry.get("wins", 0)
         lines.append(f"{medal} {name} ({team})  {pts}分  🏆{wins}胜")
     return "\n".join(lines)
@@ -198,10 +212,10 @@ def format_constructor_standings(standings: list[dict]) -> str:
     """Format constructor championship standings."""
     lines = ["🏗 车队积分榜\n"]
     for entry in standings:
-        pos = int(entry["position"])
+        pos = int(entry.get("position", 0))
         medal = POSITION_MEDALS.get(pos, f" {pos:>2}.")
-        name = entry["Constructor"]["name"]
-        pts = entry["points"]
+        name = entry.get("Constructor", {}).get("name", "未知")
+        pts = entry.get("points", "0")
         wins = entry.get("wins", 0)
         lines.append(f"{medal} {name}  {pts}分  🏆{wins}胜")
     return "\n".join(lines)
@@ -279,7 +293,10 @@ def format_practice_result(
         duration = entry.get("duration")
         lap_time = _format_lap_duration(duration) if duration else "-"
         gap = entry.get("gap_to_leader")
-        gap_str = "" if not gap else f"  +{gap:.3f}s"
+        if isinstance(gap, (int, float)):
+            gap_str = f"  +{gap:.3f}s"
+        else:
+            gap_str = ""
         medal = POSITION_MEDALS.get(int(pos) if str(pos).isdigit() else 99, f" {pos:>2}.")
         lines.append(f"{medal} {name} ({team})\n       ⏱ {lap_time}{gap_str}")
 

@@ -33,9 +33,10 @@ async def _get_session() -> aiohttp.ClientSession:
 
 async def close_session() -> None:
     global _CLIENT_SESSION
-    if _CLIENT_SESSION and not _CLIENT_SESSION.closed:
-        await _CLIENT_SESSION.close()
-        _CLIENT_SESSION = None
+    async with _SESSION_LOCK:
+        if _CLIENT_SESSION and not _CLIENT_SESSION.closed:
+            await _CLIENT_SESSION.close()
+            _CLIENT_SESSION = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -101,6 +102,19 @@ async def get_constructor_standings(season: int | str = "current") -> list[dict]
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _parse_iso_datetime(s: str) -> datetime | None:
+    """Parse an ISO 8601 datetime string to a timezone-aware datetime.
+
+    Handles common variations such as trailing 'Z', '+00:00', and
+    fractional seconds.  Returns *None* when parsing fails.
+    """
+    try:
+        # Replace trailing 'Z' with '+00:00' for fromisoformat compatibility
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 async def _openf1_get(path: str, params: dict | None = None) -> list[dict]:
     session = await _get_session()
     url = f"{OPENF1_BASE}{path}"
@@ -122,9 +136,15 @@ async def get_latest_session(session_name: str = "Race") -> dict | None:
     )
     if not results:
         return None
-    now_iso = datetime.now(timezone.utc).isoformat()
-    past = [r for r in results if r.get("date_start", "") <= now_iso]
-    return past[-1] if past else None
+    now = datetime.now(timezone.utc)
+    past = [
+        r for r in results
+        if (dt := _parse_iso_datetime(r.get("date_start", ""))) is not None and dt <= now
+    ]
+    if not past:
+        return None
+    past.sort(key=lambda r: _parse_iso_datetime(r.get("date_start", "")) or datetime.min.replace(tzinfo=timezone.utc))
+    return past[-1]
 
 
 async def get_drivers_for_session(session_key: int | str) -> list[dict]:
@@ -191,9 +211,15 @@ async def get_practice_session(fp_number: str = "1", year: int | None = None) ->
     )
     if not results:
         return None
-    now_iso = datetime.now(timezone.utc).isoformat()
-    past = [r for r in results if r.get("date_start", "") <= now_iso]
-    return past[-1] if past else None
+    now = datetime.now(timezone.utc)
+    past = [
+        r for r in results
+        if (dt := _parse_iso_datetime(r.get("date_start", ""))) is not None and dt <= now
+    ]
+    if not past:
+        return None
+    past.sort(key=lambda r: _parse_iso_datetime(r.get("date_start", "")) or datetime.min.replace(tzinfo=timezone.utc))
+    return past[-1]
 
 
 async def get_session_result(session_key: int | str) -> list[dict]:

@@ -18,9 +18,10 @@ Events tracked:
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING
+
+from astrbot.api import logger
 
 from . import _f1_api as api
 from . import _formatter as fmt
@@ -28,8 +29,6 @@ from . import _formatter as fmt
 if TYPE_CHECKING:
     from astrbot.core.star.context import Context
     from astrbot.api.star import Star
-
-logger = logging.getLogger("astrbot")
 
 POLL_INTERVAL = 60          # seconds
 WEEKEND_START_THRESHOLD = timedelta(hours=24)  # notify 24 h before first session
@@ -56,22 +55,26 @@ class F1Scheduler:
             self._task = asyncio.create_task(self._run())
             logger.info("[F1Notifier] Scheduler started.")
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
             logger.info("[F1Notifier] Scheduler stopped.")
 
-    def add_subscriber(self, session: str) -> bool:
+    async def add_subscriber(self, session: str) -> bool:
         if session not in self._subscribers:
             self._subscribers.append(session)
-            asyncio.create_task(self._persist_subscribers())
+            await self._persist_subscribers()
             return True
         return False
 
-    def remove_subscriber(self, session: str) -> bool:
+    async def remove_subscriber(self, session: str) -> bool:
         if session in self._subscribers:
             self._subscribers.remove(session)
-            asyncio.create_task(self._persist_subscribers())
+            await self._persist_subscribers()
             return True
         return False
 
@@ -105,29 +108,32 @@ class F1Scheduler:
         events = self._state.get("notified_events", [])
         return r == round_num and event in events
 
-    def _mark_notified(self, round_num: int, event: str) -> None:
+    async def _mark_notified(self, round_num: int, event: str) -> None:
         if self._state.get("last_notified_round") != round_num:
             self._state["last_notified_round"] = round_num
             self._state["notified_events"] = []
         if event not in self._state["notified_events"]:
             self._state["notified_events"].append(event)
-        asyncio.create_task(self._persist_state())
+        await self._persist_state()
 
     async def _broadcast(self, text: str) -> None:
-        """Send message to all subscribers."""
+        """Send message to all subscribers concurrently."""
         from astrbot.core.message.message_event_result import MessageChain
         from astrbot.api.message_components import Plain
 
         if not self._subscribers:
             return
         chain = MessageChain([Plain(text)])
-        for session_str in list(self._subscribers):
+
+        async def _send(session_str: str) -> None:
             try:
                 ok = await self.ctx.send_message(session_str, chain)
                 if not ok:
                     logger.warning(f"[F1Notifier] Failed to send to {session_str}")
             except Exception as e:
                 logger.error(f"[F1Notifier] Broadcast error to {session_str}: {e}")
+
+        await asyncio.gather(*[_send(s) for s in list(self._subscribers)])
 
     @staticmethod
     def _parse_utc(date_str: str, time_str: str) -> datetime:
@@ -194,7 +200,7 @@ class F1Scheduler:
                     if not self._notified(round_num, "weekend_start"):
                         msg = fmt.format_weekend_start(next_race)
                         await self._broadcast(msg)
-                        self._mark_notified(round_num, "weekend_start")
+                        await self._mark_notified(round_num, "weekend_start")
                         logger.info(f"[F1Notifier] Sent weekend_start for round {round_num}")
 
             # ── 2. Practice session result push ───────────────────────────
@@ -223,7 +229,7 @@ class F1Scheduler:
                                         of1_session, results, drivers_by_num, fp_num
                                     )
                                     await self._broadcast(msg)
-                                    self._mark_notified(round_num, event_key)
+                                    await self._mark_notified(round_num, event_key)
                                     logger.info(f"[F1Notifier] Sent {event_key} for round {round_num}")
                         except Exception as e:
                             logger.warning(f"[F1Notifier] FP{fp_num} result not ready: {e}")
@@ -240,7 +246,7 @@ class F1Scheduler:
                             if result and result.get("QualifyingResults"):
                                 msg = fmt.format_qualifying_result(result)
                                 await self._broadcast(msg)
-                                self._mark_notified(round_num, "qualifying_result")
+                                await self._mark_notified(round_num, "qualifying_result")
                                 logger.info(f"[F1Notifier] Sent qualifying_result for round {round_num}")
                         except Exception as e:
                             logger.warning(f"[F1Notifier] Qualifying result not ready: {e}")
@@ -263,7 +269,7 @@ class F1Scheduler:
                         else:
                             msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
                         await self._broadcast(msg)
-                        self._mark_notified(round_num, "pre_race")
+                        await self._mark_notified(round_num, "pre_race")
                         logger.info(f"[F1Notifier] Sent pre_race for round {round_num}")
                     except Exception as e:
                         logger.warning(f"[F1Notifier] Pre-race grid error: {e}")
@@ -282,7 +288,7 @@ class F1Scheduler:
                     if result and result.get("Results"):
                         msg = fmt.format_race_result(result)
                         await self._broadcast(msg)
-                        self._mark_notified(lf_round, "race_result")
+                        await self._mark_notified(lf_round, "race_result")
                         logger.info(f"[F1Notifier] Sent race_result for round {lf_round}")
                 except Exception as e:
                     logger.warning(f"[F1Notifier] Race result not ready: {e}")
@@ -298,7 +304,7 @@ class F1Scheduler:
                             if result and result.get("SprintResults"):
                                 msg = fmt.format_sprint_result(result)
                                 await self._broadcast(msg)
-                                self._mark_notified(lf_round, "sprint_result")
+                                await self._mark_notified(lf_round, "sprint_result")
                                 logger.info(f"[F1Notifier] Sent sprint_result for round {lf_round}")
                         except Exception as e:
                             logger.warning(f"[F1Notifier] Sprint result not ready: {e}")

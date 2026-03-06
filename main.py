@@ -69,7 +69,7 @@ class F1NotifierPlugin(Star):
 
     async def terminate(self) -> None:
         """Stop the scheduler and close HTTP session."""
-        self.scheduler.stop()
+        await self.scheduler.stop()
         await api.close_session()
         logger.info("[F1Notifier] Plugin terminated.")
 
@@ -101,15 +101,21 @@ class F1NotifierPlugin(Star):
         try:
             races = await api.get_current_schedule()
             now = datetime.now(timezone.utc)
-            next_race = next(
-                (
-                    r for r in races
-                    if datetime.fromisoformat(
-                        f"{r['date']}T{r['time'].rstrip('Z')}+00:00"
-                    ) >= now
-                ),
-                None,
-            )
+            next_race = None
+            for r in races:
+                date_str = r.get("date")
+                time_str = r.get("time")
+                if not date_str or not time_str:
+                    continue
+                try:
+                    race_dt = datetime.fromisoformat(
+                        f"{date_str}T{time_str.rstrip('Z')}+00:00"
+                    )
+                except (ValueError, TypeError):
+                    continue
+                if race_dt >= now:
+                    next_race = r
+                    break
             if not next_race:
                 yield event.plain_result("📅 本赛季剩余赛程已全部完成，期待下赛季！")
             else:
@@ -163,24 +169,24 @@ class F1NotifierPlugin(Star):
     @f1.command("practice")
     async def f1_practice(self, event: AstrMessageEvent, session: str = "1"):
         """查看练习赛最快圈速。session: 1/2/3（默认1，也可输入 fp1/fp2/fp3）"""
-        fp_num = session.lower().lstrip("fp") or "1"  # 'fp1' → '1', '1' → '1'
-        if fp_num not in ("1", "2", "3"):
+        normalized = session.lower().removeprefix("fp") or "1"  # 'fp1' → '1', '1' → '1'
+        if normalized not in ("1", "2", "3"):
             yield event.plain_result("❌ 请输入有效的练习赛场次：1、2、或 3（如 /f1 practice 2）")
             return
         try:
-            of1_session = await api.get_practice_session(fp_num)
+            of1_session = await api.get_practice_session(normalized)
             if not of1_session:
-                yield event.plain_result(f"⏳ 暂未找到 FP{fp_num} 练习赛数据，请练习赛结束后再试。")
+                yield event.plain_result(f"⏳ 暂未找到 FP{normalized} 练习赛数据，请练习赛结束后再试。")
                 return
             sk = of1_session["session_key"]
             results = await api.get_session_result(sk)
             drivers_list = await api.get_drivers_for_session(sk)
             drivers_by_num = {d["driver_number"]: d for d in drivers_list}
             if not results:
-                yield event.plain_result(f"⏳ FP{fp_num} 结果数据暂未就绪，请练习赛结束后再试。")
+                yield event.plain_result(f"⏳ FP{normalized} 结果数据暂未就绪，请练习赛结束后再试。")
                 return
             yield event.plain_result(
-                fmt.format_practice_result(of1_session, results, drivers_by_num, fp_num)
+                fmt.format_practice_result(of1_session, results, drivers_by_num, normalized)
             )
         except Exception as e:
             logger.error(f"[F1Notifier] /f1 practice error: {e}")
@@ -204,7 +210,7 @@ class F1NotifierPlugin(Star):
     async def f1_subscribe(self, event: AstrMessageEvent):
         """订阅当前会话的自动推送"""
         session = event.unified_msg_origin
-        added = self.scheduler.add_subscriber(session)
+        added = await self.scheduler.add_subscriber(session)
         if added:
             yield event.plain_result(
                 f"✅ 已订阅 F1 自动推送！\n"
@@ -218,7 +224,7 @@ class F1NotifierPlugin(Star):
     async def f1_unsubscribe(self, event: AstrMessageEvent):
         """取消当前会话的自动推送"""
         session = event.unified_msg_origin
-        removed = self.scheduler.remove_subscriber(session)
+        removed = await self.scheduler.remove_subscriber(session)
         if removed:
             yield event.plain_result("✅ 已取消订阅 F1 自动推送。")
         else:

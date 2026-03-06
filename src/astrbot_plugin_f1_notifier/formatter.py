@@ -1,6 +1,6 @@
 """Message formatter module for F1 notifications.
 
-All functions accept typed Pydantic models from ``_models.py`` and return
+All functions accept typed Pydantic models from ``models.py`` and return
 plain-text strings ready to send as chat messages.
 Times are converted from UTC to Asia/Shanghai (UTC+8) for display.
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from ._models import (
+from .models import (
     JolpicaRace,
     JolpicaDriverStanding,
     JolpicaConstructorStanding,

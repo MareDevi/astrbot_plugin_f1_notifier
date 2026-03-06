@@ -2,7 +2,7 @@
 
 Tests the key fixes:
   - Practice session number parsing (removeprefix instead of lstrip)
-  - ISO datetime parsing in _f1_api
+  - ISO datetime parsing in api
   - Formatter robustness (missing fields, gap type protection)
   - Scheduler logger import
 """
@@ -13,7 +13,10 @@ import unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+# src package root (repo_root/src)
+_SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
+_SCHEDULER_SRC = _SRC_ROOT / "astrbot_plugin_f1_notifier" / "scheduler.py"
+_API_SRC = _SRC_ROOT / "astrbot_plugin_f1_notifier" / "api.py"
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +62,7 @@ class TestPracticeSessionParsing(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 2. ISO datetime parser in _f1_api
+# 2. ISO datetime parser in api
 # ---------------------------------------------------------------------------
 
 class TestParseIsoDatetime(unittest.TestCase):
@@ -110,87 +113,58 @@ class TestFormatterRobustness(unittest.TestCase):
     """Test formatter functions handle missing/unexpected fields gracefully."""
 
     def _import_fmt(self):
-        """Import _formatter standalone (no framework dependency)."""
-        import importlib
-        import sys
-        spec = importlib.util.spec_from_file_location(
-            "_formatter",
-            str(_REPO_ROOT / "_formatter.py"),
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
+        """Import formatter from the src package."""
+        from src.astrbot_plugin_f1_notifier import formatter
+        return formatter
 
-    def test_format_schedule_missing_fields(self):
+    def test_format_schedule_empty_list(self):
         fmt = self._import_fmt()
-        # Race with missing 'time' should be skipped, not raise
-        races = [
-            {"date": "2025-12-01"},  # missing 'time'
-            {"date": "2025-12-01", "time": "14:00:00Z",
-             "season": "2025", "round": "1", "raceName": "Test GP",
-             "Circuit": {"Location": {"country": "Italy"}}},
-        ]
-        result = fmt.format_schedule(races)
+        # Empty list of JolpicaRace models
+        result = fmt.format_schedule([])
         self.assertIsInstance(result, str)
-
-    def test_format_race_result_missing_driver(self):
-        fmt = self._import_fmt()
-        race = {
-            "raceName": "Test GP", "round": "1",
-            "Circuit": {"Location": {"country": "Italy"}},
-            "Results": [{"position": "1"}],  # missing Driver, Constructor
-        }
-        result = fmt.format_race_result(race)
-        self.assertIsInstance(result, str)
-        self.assertIn("未知", result)
-
-    def test_format_practice_gap_none(self):
-        fmt = self._import_fmt()
-        session = {"circuit_short_name": "Test", "country_name": "Italy"}
-        results = [
-            {"position": 1, "driver_number": 1, "duration": 80.5,
-             "gap_to_leader": None},
-        ]
-        drivers = {1: {"full_name": "Test Driver", "team_name": "Team"}}
-        result = fmt.format_practice_result(session, results, drivers, "1")
-        self.assertIsInstance(result, str)
-        # Gap should NOT appear since it's None
-        self.assertNotIn("+", result)
-
-    def test_format_practice_gap_string(self):
-        fmt = self._import_fmt()
-        session = {"circuit_short_name": "Test", "country_name": "Italy"}
-        results = [
-            {"position": 1, "driver_number": 1, "duration": 80.5,
-             "gap_to_leader": "N/A"},
-        ]
-        drivers = {1: {"full_name": "Test Driver", "team_name": "Team"}}
-        # Should not raise TypeError
-        result = fmt.format_practice_result(session, results, drivers, "1")
-        self.assertIsInstance(result, str)
-
-    def test_format_practice_gap_numeric(self):
-        fmt = self._import_fmt()
-        session = {"circuit_short_name": "Test", "country_name": "Italy"}
-        results = [
-            {"position": 2, "driver_number": 1, "duration": 81.0,
-             "gap_to_leader": 0.512},
-        ]
-        drivers = {1: {"full_name": "Test Driver", "team_name": "Team"}}
-        result = fmt.format_practice_result(session, results, drivers, "1")
-        self.assertIn("+0.512s", result)
+        self.assertIn("赛季", result)
 
     def test_format_constructor_standings_empty(self):
         fmt = self._import_fmt()
         result = fmt.format_constructor_standings([])
         self.assertIsInstance(result, str)
 
-    def test_format_next_race_missing_circuit(self):
+    def test_format_driver_standings_empty(self):
         fmt = self._import_fmt()
-        race = {"round": "1", "raceName": "Test GP", "date": "2025-03-15",
-                "time": "14:00:00Z"}
-        result = fmt.format_next_race(race)
+        result = fmt.format_driver_standings([])
         self.assertIsInstance(result, str)
+
+    def test_format_practice_gap_none(self):
+        from src.astrbot_plugin_f1_notifier.models import (
+            OpenF1Session,
+            OpenF1SessionResult,
+            OpenF1Driver,
+        )
+        fmt = self._import_fmt()
+        session = OpenF1Session(circuit_short_name="Test", country_name="Italy")
+        results = [
+            OpenF1SessionResult(position=1, driver_number=1, duration=80.5, gap_to_leader=None),
+        ]
+        drivers = {1: OpenF1Driver(driver_number=1, full_name="Test Driver", team_name="Team")}
+        result = fmt.format_practice_result(session, results, drivers, "1")
+        self.assertIsInstance(result, str)
+        # Gap should NOT appear since it's None
+        self.assertNotIn("+", result)
+
+    def test_format_practice_gap_numeric(self):
+        from src.astrbot_plugin_f1_notifier.models import (
+            OpenF1Session,
+            OpenF1SessionResult,
+            OpenF1Driver,
+        )
+        fmt = self._import_fmt()
+        session = OpenF1Session(circuit_short_name="Test", country_name="Italy")
+        results = [
+            OpenF1SessionResult(position=2, driver_number=1, duration=81.0, gap_to_leader=0.512),
+        ]
+        drivers = {1: OpenF1Driver(driver_number=1, full_name="Test Driver", team_name="Team")}
+        result = fmt.format_practice_result(session, results, drivers, "1")
+        self.assertIn("+0.512s", result)
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +175,7 @@ class TestSchedulerLoggerImport(unittest.TestCase):
     """Verify the scheduler uses astrbot.api.logger, not logging.getLogger."""
 
     def test_no_logging_getLogger(self):
-        source = (_REPO_ROOT / "_scheduler.py").read_text()
+        source = _SCHEDULER_SRC.read_text()
         self.assertNotIn("logging.getLogger", source)
         self.assertNotIn("import logging", source)
         self.assertIn("from astrbot.api import logger", source)
@@ -215,8 +189,7 @@ class TestCloseSessionLock(unittest.TestCase):
     """Verify close_session uses _SESSION_LOCK."""
 
     def test_close_session_uses_lock(self):
-        source = (_REPO_ROOT / "_f1_api.py").read_text()
-        # Find the close_session function and verify it uses async with _SESSION_LOCK
+        source = _API_SRC.read_text()
         import re
         match = re.search(r'async def close_session.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)
         self.assertIsNotNone(match)

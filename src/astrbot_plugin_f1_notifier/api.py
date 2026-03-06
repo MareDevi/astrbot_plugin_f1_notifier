@@ -21,7 +21,7 @@ from typing import Any
 
 import aiohttp
 
-from ._models import (
+from .models import (
     Success,
     Failure,
     JolpicaRace,
@@ -36,7 +36,7 @@ from ._models import (
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from ._models import (
+    from .models import (
         ScheduleResult,
         RaceResult,
         StandingsResult,

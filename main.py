@@ -26,10 +26,10 @@ from astrbot.api import logger
 
 import asyncio as _asyncio
 
-from . import _f1_api as api
-from . import _formatter as fmt
-from ._models import Success, Failure
-from ._scheduler import F1Scheduler
+from .src.astrbot_plugin_f1_notifier import api
+from .src.astrbot_plugin_f1_notifier import formatter as fmt
+from .src.astrbot_plugin_f1_notifier.models import Success, Failure
+from .src.astrbot_plugin_f1_notifier.scheduler import F1Scheduler
 
 HELP_TEXT = """🏎 F1 Notifier 指令列表
 

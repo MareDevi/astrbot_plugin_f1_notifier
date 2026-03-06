@@ -23,9 +23,9 @@ from typing import TYPE_CHECKING
 
 from astrbot.api import logger
 
-from . import _f1_api as api
-from . import _formatter as fmt
-from ._models import Success, Failure, JolpicaRace, JolpicaSessionSchedule
+from . import api
+from . import formatter as fmt
+from .models import Success, Failure, JolpicaRace, JolpicaSessionSchedule
 
 if TYPE_CHECKING:
     from astrbot.core.star.context import Context

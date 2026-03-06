@@ -487,19 +487,23 @@ class TestSchedulerErrorBackoff(unittest.TestCase):
         source = _SCHEDULER_SRC.read_text(encoding='utf-8')
         self.assertIn("MIN_ERROR_SLEEP", source)
 
-    def test_error_branch_sleeps_min(self):
-        """Ensure the except branch in _run sleeps for at least MIN_ERROR_SLEEP."""
+    def test_sleep_uses_min_error_sleep_as_floor(self):
+        """Ensure sleep_time uses MIN_ERROR_SLEEP as a floor instead of 0."""
         func_body = self._run_body()
         self.assertIn("MIN_ERROR_SLEEP", func_body)
-        self.assertIn("asyncio.sleep(MIN_ERROR_SLEEP)", func_body)
+        # The sleep calculation should use MIN_ERROR_SLEEP as the lower bound
+        # so that even on fast exceptions, the loop never sleeps less than that.
+        self.assertIn("max(MIN_ERROR_SLEEP, POLL_INTERVAL - elapsed)", func_body)
 
-    def test_error_branch_continues(self):
-        """Ensure the except branch continues (skips normal sleep calculation)."""
+    def test_no_continue_in_error_branch(self):
+        """Ensure the error branch does NOT use continue (shares the normal sleep path)."""
         func_body = self._run_body()
-        # The error handler should sleep and then continue, skipping the normal
-        # elapsed-time sleep.  Verify both appear after "except Exception".
+        # After the except block, the code should fall through to the shared
+        # elapsed-time sleep rather than short-circuiting with continue.
         error_onwards = func_body[func_body.index("except Exception"):]
-        self.assertIn("continue", error_onwards.split("elapsed")[0])
+        # 'continue' should not appear before the sleep calculation
+        before_sleep = error_onwards.split("sleep_time")[0]
+        self.assertNotIn("continue", before_sleep)
 
 
 if __name__ == "__main__":

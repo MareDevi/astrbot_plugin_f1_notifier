@@ -100,7 +100,7 @@ async def _jolpica_get(path: str) -> dict[str, Any]:
         return await resp.json(content_type=None)
 
 
-async def _openf1_get(path: str, params: dict | None = None) -> list[dict]:
+async def _openf1_get(path: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     session = await _get_session()
     url = f"{OPENF1_BASE}{path}"
     async with session.get(url, params=params) as resp:

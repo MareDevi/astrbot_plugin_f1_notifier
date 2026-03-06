@@ -448,5 +448,63 @@ class TestSchedulerFixes(unittest.TestCase):
         self.assertIn("timedelta", func_body)
 
 
+# ---------------------------------------------------------------------------
+# 14. API precise type hints for _openf1_get
+# ---------------------------------------------------------------------------
+
+class TestApiPreciseTypeHints(unittest.TestCase):
+    """Verify _openf1_get uses dict[str, Any] instead of bare dict."""
+
+    def test_openf1_get_params_type_hint(self):
+        """Ensure params uses dict[str, Any] | None."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        self.assertIn("dict[str, Any] | None", source)
+
+    def test_openf1_get_return_type_hint(self):
+        """Ensure return type uses list[dict[str, Any]]."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        self.assertIn("-> list[dict[str, Any]]", source)
+
+
+# ---------------------------------------------------------------------------
+# 15. Scheduler error backoff (anti-avalanche)
+# ---------------------------------------------------------------------------
+
+class TestSchedulerErrorBackoff(unittest.TestCase):
+    """Verify scheduler._run has a minimum error sleep to prevent avalanche."""
+
+    @staticmethod
+    def _run_body() -> str:
+        """Extract the body of the _run method from scheduler source."""
+        import re
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        match = re.search(r'async def _run.*?(?=\n    async def |\nclass |\Z)', source, re.DOTALL)
+        assert match is not None, "_run method not found"
+        return match.group()
+
+    def test_min_error_sleep_constant_exists(self):
+        """Ensure MIN_ERROR_SLEEP constant is defined."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        self.assertIn("MIN_ERROR_SLEEP", source)
+
+    def test_sleep_uses_min_error_sleep_as_floor(self):
+        """Ensure sleep_time uses MIN_ERROR_SLEEP as a floor instead of 0."""
+        func_body = self._run_body()
+        self.assertIn("MIN_ERROR_SLEEP", func_body)
+        # The sleep calculation should use MIN_ERROR_SLEEP as the lower bound
+        # so that even on fast exceptions, the loop never sleeps less than that.
+        self.assertIn("max(MIN_ERROR_SLEEP, POLL_INTERVAL - elapsed)", func_body)
+
+    def test_no_continue_in_error_branch(self):
+        """Ensure the error branch does NOT use continue (shares the normal sleep path)."""
+        func_body = self._run_body()
+        # After the except block, the code should fall through to the shared
+        # elapsed-time sleep rather than short-circuiting with continue.
+        error_onwards = func_body[func_body.index("except Exception"):]
+        # 'continue' should not appear before the sleep calculation
+        before_sleep = error_onwards.split("sleep_time")[0]
+        self.assertNotIn("continue", before_sleep)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from astrbot.api.star import Star
 
 POLL_INTERVAL = 60          # seconds
+MIN_ERROR_SLEEP = 10        # minimum sleep after an error (anti-avalanche)
 WEEKEND_START_THRESHOLD = timedelta(hours=24)  # notify 24 h before first session
 PRE_RACE_THRESHOLD = timedelta(minutes=30)     # notify 30 min before race
 
@@ -206,7 +207,7 @@ class F1Scheduler:
             except Exception as e:
                 logger.error(f"[F1Notifier] Scheduler error: {e}", exc_info=True)
             elapsed = loop.time() - start
-            sleep_time = max(0, POLL_INTERVAL - elapsed)
+            sleep_time = max(MIN_ERROR_SLEEP, POLL_INTERVAL - elapsed)
             await asyncio.sleep(sleep_time)
 
     async def _check_and_notify(self) -> None:

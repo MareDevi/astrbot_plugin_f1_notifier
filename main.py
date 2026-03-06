@@ -18,17 +18,16 @@ Commands (prefix /f1):
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-
-import asyncio
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star, register
 
 from .src.astrbot_plugin_f1_notifier import api
 from .src.astrbot_plugin_f1_notifier import formatter as fmt
-from .src.astrbot_plugin_f1_notifier.models import Success, Failure
+from .src.astrbot_plugin_f1_notifier.models import Failure, Success
 from .src.astrbot_plugin_f1_notifier.scheduler import F1Scheduler
 
 HELP_TEXT = """🏎 F1 Notifier 指令列表
@@ -58,7 +57,7 @@ HELP_TEXT = """🏎 F1 Notifier 指令列表
     "astrbot_plugin_f1_notifier",
     "MareDevi",
     "F1赛事推送与查询插件",
-    "1.0.0",
+    "1.0.2",
     "https://github.com/MareDevi/astrbot_plugin_f1_notifier",
 )
 class F1NotifierPlugin(Star):
@@ -114,7 +113,9 @@ class F1NotifierPlugin(Star):
                         next_race = race
                         break
                 if next_race is None:
-                    yield event.plain_result("📅 本赛季剩余赛程已全部完成，期待下赛季！")
+                    yield event.plain_result(
+                        "📅 本赛季剩余赛程已全部完成，期待下赛季！"
+                    )
                 else:
                     yield event.plain_result(fmt.format_next_race(next_race))
             case Failure(error=err):
@@ -168,14 +169,18 @@ class F1NotifierPlugin(Star):
         """查看练习赛最快圈速。session: 1/2/3（默认1，也可输入 fp1/fp2/fp3）"""
         normalized = session.lower().removeprefix("fp") or "1"
         if normalized not in ("1", "2", "3"):
-            yield event.plain_result("❌ 请输入有效的练习赛场次：1、2、或 3（如 /f1 practice 2）")
+            yield event.plain_result(
+                "❌ 请输入有效的练习赛场次：1、2、或 3（如 /f1 practice 2）"
+            )
             return
 
         session_result = await api.get_practice_session(normalized)
         match session_result:
             case Failure(error=err):
                 logger.warning(f"[F1Notifier] /f1 practice session lookup: {err}")
-                yield event.plain_result(f"⏳ 暂未找到 FP{normalized} 练习赛数据，请练习赛结束后再试。")
+                yield event.plain_result(
+                    f"⏳ 暂未找到 FP{normalized} 练习赛数据，请练习赛结束后再试。"
+                )
                 return
             case Success(value=of1_session):
                 sk = of1_session.session_key
@@ -184,16 +189,24 @@ class F1NotifierPlugin(Star):
                     api.get_drivers_for_session(sk),
                 )
                 match (results_result, drivers_result):
-                    case (Success(value=results), Success(value=drivers_list)) if results:
+                    case (Success(value=results), Success(value=drivers_list)) if (
+                        results
+                    ):
                         drivers_by_num = {d.driver_number: d for d in drivers_list}
                         yield event.plain_result(
-                            fmt.format_practice_result(of1_session, results, drivers_by_num, normalized)
+                            fmt.format_practice_result(
+                                of1_session, results, drivers_by_num, normalized
+                            )
                         )
                     case (Success(), Failure(error=err)):
                         logger.error(f"[F1Notifier] /f1 practice drivers error: {err}")
-                        yield event.plain_result("❌ 获取练习赛车手数据失败，请稍后重试。")
+                        yield event.plain_result(
+                            "❌ 获取练习赛车手数据失败，请稍后重试。"
+                        )
                     case (Success(), _):
-                        yield event.plain_result(f"⏳ FP{normalized} 结果数据暂未就绪，请练习赛结束后再试。")
+                        yield event.plain_result(
+                            f"⏳ FP{normalized} 结果数据暂未就绪，请练习赛结束后再试。"
+                        )
                     case (Failure(error=err), _):
                         logger.error(f"[F1Notifier] /f1 practice error: {err}")
                         yield event.plain_result("❌ 获取练习赛数据失败，请稍后重试。")
@@ -206,7 +219,9 @@ class F1NotifierPlugin(Star):
                 result = await api.get_constructor_standings()
                 match result:
                     case Success(value=standings):
-                        yield event.plain_result(fmt.format_constructor_standings(standings))
+                        yield event.plain_result(
+                            fmt.format_constructor_standings(standings)
+                        )
                     case Failure(error=err):
                         logger.error(f"[F1Notifier] /f1 standings teams error: {err}")
                         yield event.plain_result("❌ 获取车队积分榜失败，请稍后重试。")
@@ -231,7 +246,9 @@ class F1NotifierPlugin(Star):
                 "将自动推送：赛程提醒、排位/冲刺赛结果、发车顺序、正赛结果。"
             )
         else:
-            yield event.plain_result("ℹ️ 当前会话已经订阅过了。发送 /f1 unsubscribe 可以取消。")
+            yield event.plain_result(
+                "ℹ️ 当前会话已经订阅过了。发送 /f1 unsubscribe 可以取消。"
+            )
 
     @f1.command("unsubscribe")
     async def f1_unsubscribe(self, event: AstrMessageEvent):
@@ -241,7 +258,9 @@ class F1NotifierPlugin(Star):
         if removed:
             yield event.plain_result("✅ 已取消订阅 F1 自动推送。")
         else:
-            yield event.plain_result("ℹ️ 当前会话尚未订阅。发送 /f1 subscribe 可以订阅。")
+            yield event.plain_result(
+                "ℹ️ 当前会话尚未订阅。发送 /f1 subscribe 可以订阅。"
+            )
 
     @f1.command("test")
     async def f1_test(self, event: AstrMessageEvent, season: str = "2025"):
@@ -257,7 +276,9 @@ class F1NotifierPlugin(Star):
                         case [*items]:
                             return (name, True, f"✅ {len(items)} 条记录")
                         case obj:
-                            label = getattr(obj, "race_name", None) or getattr(obj, "driver", None)
+                            label = getattr(obj, "race_name", None) or getattr(
+                                obj, "driver", None
+                            )
                             detail = f"✅ {label}" if label else "✅"
                             return (name, True, detail)
                 case Failure(error=err):
@@ -272,15 +293,17 @@ class F1NotifierPlugin(Star):
                 case Failure() as f:
                     return f
 
-        results: list[tuple[str, bool, str]] = list(await asyncio.gather(
-            run("赛程",         api.get_current_schedule(yr)),
-            run("正赛结果(R1)", api.get_race_result(1, yr)),
-            run("排位(R1)",     api.get_qualifying_result(1, yr)),
-            run("冲刺(R5)",     api.get_sprint_result(5, yr)),
-            run("车手积分",     api.get_driver_standings(yr)),
-            run("车队积分",     api.get_constructor_standings(yr)),
-            run("练习赛(FP1)", _fp_test()),
-        ))
+        results: list[tuple[str, bool, str]] = list(
+            await asyncio.gather(
+                run("赛程", api.get_current_schedule(yr)),
+                run("正赛结果(R1)", api.get_race_result(1, yr)),
+                run("排位(R1)", api.get_qualifying_result(1, yr)),
+                run("冲刺(R5)", api.get_sprint_result(5, yr)),
+                run("车手积分", api.get_driver_standings(yr)),
+                run("车队积分", api.get_constructor_standings(yr)),
+                run("练习赛(FP1)", _fp_test()),
+            )
+        )
 
         lines = [f"📋 F1 插件测试报告 ({yr} 赛季)\n"]
         passed = sum(1 for _, ok, _ in results if ok)
@@ -288,5 +311,3 @@ class F1NotifierPlugin(Star):
             lines.append(f"  {'✅' if ok else '❌'} {name}: {detail}")
         lines.append(f"\n共 {passed}/{len(results)} 项通过")
         yield event.plain_result("\n".join(lines))
-
-

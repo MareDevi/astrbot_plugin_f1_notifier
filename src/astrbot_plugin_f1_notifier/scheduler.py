@@ -18,24 +18,25 @@ Events tracked:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from astrbot.api import logger
 
 from . import api
 from . import formatter as fmt
-from .models import Success, Failure, JolpicaRace, JolpicaSessionSchedule, OpenF1Session
+from .models import Failure, JolpicaRace, JolpicaSessionSchedule, OpenF1Session, Success
 
 if TYPE_CHECKING:
-    from astrbot.core.star.context import Context
     from astrbot.api.star import Star
+    from astrbot.core.star.context import Context
 
-POLL_INTERVAL = 60          # seconds
-MIN_ERROR_SLEEP = 10        # minimum sleep after an error (anti-avalanche)
-BROADCAST_CONCURRENCY = 5   # max concurrent sends in _broadcast
+POLL_INTERVAL = 60  # seconds
+MIN_ERROR_SLEEP = 10  # minimum sleep after an error (anti-avalanche)
+BROADCAST_CONCURRENCY = 5  # max concurrent sends in _broadcast
 WEEKEND_START_THRESHOLD = timedelta(hours=24)  # notify 24 h before first session
-PRE_RACE_THRESHOLD = timedelta(minutes=30)     # notify 30 min before race
+PRE_RACE_THRESHOLD = timedelta(minutes=30)  # notify 30 min before race
+
 
 def _default_state() -> dict:
     """Factory function to create a fresh default state dict."""
@@ -45,7 +46,7 @@ def _default_state() -> dict:
 class F1Scheduler:
     """Manages automated F1 push notifications."""
 
-    def __init__(self, star: "Star", context: "Context") -> None:
+    def __init__(self, star: Star, context: Context) -> None:
         self.ctx = context
         self._star = star
         self._subscribers: list[str] = []
@@ -94,7 +95,10 @@ class F1Scheduler:
     async def _load(self) -> None:
         """Load subscribers and state from AstrBot KV store."""
         self._subscribers = await self._star.get_kv_data("f1_subscribers", []) or []
-        self._state = await self._star.get_kv_data("f1_state", _default_state()) or _default_state()
+        self._state = (
+            await self._star.get_kv_data("f1_state", _default_state())
+            or _default_state()
+        )
         self._loaded = True
         logger.info(
             f"[F1Notifier] Loaded {len(self._subscribers)} subscriber(s) from KV store."
@@ -123,8 +127,8 @@ class F1Scheduler:
 
     async def _broadcast(self, text: str) -> None:
         """Send message to all subscribers with limited concurrency."""
-        from astrbot.core.message.message_event_result import MessageChain
         from astrbot.api.message_components import Plain
+        from astrbot.core.message.message_event_result import MessageChain
 
         if not self._subscribers:
             return
@@ -180,9 +184,7 @@ class F1Scheduler:
         return min(times) if times else None
 
     @staticmethod
-    def _session_matches_slot(
-        session: OpenF1Session, expected_time: datetime
-    ) -> bool:
+    def _session_matches_slot(session: OpenF1Session, expected_time: datetime) -> bool:
         """Check that the OpenF1 session started within 24 h of *expected_time*.
 
         This guards against the API returning a stale session from a
@@ -262,9 +264,9 @@ class F1Scheduler:
     ) -> None:
         """Push practice session results once each session has been over for 90 min."""
         fp_sessions = [
-            (next_race.first_practice,  "1", "fp1_result"),
+            (next_race.first_practice, "1", "fp1_result"),
             (next_race.second_practice, "2", "fp2_result"),
-            (next_race.third_practice,  "3", "fp3_result"),
+            (next_race.third_practice, "3", "fp3_result"),
         ]
         for fp_slot, fp_num, event_key in fp_sessions:
             if fp_slot is None:
@@ -279,9 +281,7 @@ class F1Scheduler:
                             # by checking date_start is within 24 h of the
                             # expected practice time (robust against country
                             # name mismatches across APIs).
-                            if not self._session_matches_slot(
-                                of1_session, fp_time
-                            ):
+                            if not self._session_matches_slot(of1_session, fp_time):
                                 logger.debug(
                                     f"[F1Notifier] FP{fp_num} session "
                                     f"date_start='{of1_session.date_start}' "
@@ -295,22 +295,37 @@ class F1Scheduler:
                                 api.get_drivers_for_session(sk),
                             )
                             match (results_res, drivers_res):
-                                case (Success(value=results), Success(value=drivers_list)) if results:
-                                    drivers_by_num = {d.driver_number: d for d in drivers_list}
+                                case (
+                                    Success(value=results),
+                                    Success(value=drivers_list),
+                                ) if results:
+                                    drivers_by_num = {
+                                        d.driver_number: d for d in drivers_list
+                                    }
                                     msg = fmt.format_practice_result(
                                         of1_session, results, drivers_by_num, fp_num
                                     )
                                     await self._broadcast(msg)
                                     await self._mark_notified(round_num, event_key)
-                                    logger.info(f"[F1Notifier] Sent {event_key} for round {round_num}")
+                                    logger.info(
+                                        f"[F1Notifier] Sent {event_key} for round {round_num}"
+                                    )
                                 case (Failure(error=err), _):
-                                    logger.warning(f"[F1Notifier] Failed to fetch FP{fp_num} results: {err}")
+                                    logger.warning(
+                                        f"[F1Notifier] Failed to fetch FP{fp_num} results: {err}"
+                                    )
                                 case (_, Failure(error=err)):
-                                    logger.warning(f"[F1Notifier] Failed to fetch FP{fp_num} drivers: {err}")
+                                    logger.warning(
+                                        f"[F1Notifier] Failed to fetch FP{fp_num} drivers: {err}"
+                                    )
                                 case _:
-                                    logger.debug(f"[F1Notifier] FP{fp_num} results not ready yet")
+                                    logger.debug(
+                                        f"[F1Notifier] FP{fp_num} results not ready yet"
+                                    )
                         case Failure(error=err):
-                            logger.warning(f"[F1Notifier] FP{fp_num} session not found: {err}")
+                            logger.warning(
+                                f"[F1Notifier] FP{fp_num} session not found: {err}"
+                            )
 
     async def _check_qualifying(
         self, next_race: JolpicaRace, round_num: int, now: datetime
@@ -318,7 +333,9 @@ class F1Scheduler:
         """Push qualifying results once qualifying has been over for 2 hours."""
         if next_race.qualifying is None:
             return
-        qual_time = self._parse_utc(next_race.qualifying.date, next_race.qualifying.time)
+        qual_time = self._parse_utc(
+            next_race.qualifying.date, next_race.qualifying.time
+        )
         if now > qual_time + timedelta(hours=2):
             if not self._notified(round_num, "qualifying_result"):
                 qual_res = await api.get_qualifying_result(round_num)
@@ -327,9 +344,13 @@ class F1Scheduler:
                         msg = fmt.format_qualifying_result(race)
                         await self._broadcast(msg)
                         await self._mark_notified(round_num, "qualifying_result")
-                        logger.info(f"[F1Notifier] Sent qualifying_result for round {round_num}")
+                        logger.info(
+                            f"[F1Notifier] Sent qualifying_result for round {round_num}"
+                        )
                     case Failure(error=err):
-                        logger.warning(f"[F1Notifier] Qualifying result not ready: {err}")
+                        logger.warning(
+                            f"[F1Notifier] Qualifying result not ready: {err}"
+                        )
 
     async def _check_pre_race(
         self,
@@ -371,11 +392,9 @@ class F1Scheduler:
     ) -> None:
         """Push race and sprint results for the most recently finished race."""
         finished = [
-            r for r in races
-            if (
-                (dt := fmt.race_utc(r)) is not None
-                and dt + timedelta(hours=3) < now
-            )
+            r
+            for r in races
+            if ((dt := fmt.race_utc(r)) is not None and dt + timedelta(hours=3) < now)
         ]
         if not finished:
             return
@@ -406,6 +425,10 @@ class F1Scheduler:
                             msg = fmt.format_sprint_result(race)
                             await self._broadcast(msg)
                             await self._mark_notified(lf_round, "sprint_result")
-                            logger.info(f"[F1Notifier] Sent sprint_result for round {lf_round}")
+                            logger.info(
+                                f"[F1Notifier] Sent sprint_result for round {lf_round}"
+                            )
                         case Failure(error=err):
-                            logger.warning(f"[F1Notifier] Sprint result not ready: {err}")
+                            logger.warning(
+                                f"[F1Notifier] Sprint result not ready: {err}"
+                            )

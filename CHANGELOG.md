@@ -1,0 +1,22 @@
+## [unreleased]
+
+### 🚀 Features
+
+- Add F1 Notifier plugin for automated race notifications and query commands
+- 更新 README.md，添加 F1 Notifier 插件功能描述和指令查询
+- Implement Pydantic models for F1 API responses and refactor scheduler
+- Enhance race schedule formatting to include all session times
+- Add F1 notification plugin with models, formatter, and scheduler
+
+### 🐛 Bug Fixes
+
+- Eliminate match/case variable scope leakage and refactor scheduler God Function
+- Add explicit Failure branches for drivers fetch errors in practice match cases
+- Remove _gather wrapper, add concurrent API calls, add broadcast semaphore
+- Use asyncio.TimeoutError in api.py and wrap sleep in CancelledError handler in scheduler.py
+- Protect error-path asyncio.sleep with nested CancelledError handler and update test
+
+### ⚙️ Miscellaneous Tasks
+
+- 更新许可证信息为 AGPL-3.0
+- Bump version to 1.0.1 in metadata and pyproject files

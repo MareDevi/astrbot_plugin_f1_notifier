@@ -7,16 +7,16 @@ Times are converted from UTC to Asia/Shanghai (UTC+8) for display.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .models import (
-    JolpicaRace,
-    JolpicaDriverStanding,
     JolpicaConstructorStanding,
+    JolpicaDriverStanding,
+    JolpicaRace,
     JolpicaSessionSchedule,
-    OpenF1Session,
     OpenF1Driver,
     OpenF1Position,
+    OpenF1Session,
     OpenF1SessionResult,
 )
 
@@ -25,13 +25,30 @@ CST = timezone(timedelta(hours=8))  # UTC+8
 # ─────────────────────── helpers ───────────────────────
 
 FLAG_MAP: dict[str, str] = {
-    "Australia": "🇦🇺", "China": "🇨🇳", "Japan": "🇯🇵", "Bahrain": "🇧🇭",
-    "Saudi Arabia": "🇸🇦", "USA": "🇺🇸", "United States": "🇺🇸", "Canada": "🇨🇦",
-    "Monaco": "🇲🇨", "Spain": "🇪🇸", "Austria": "🇦🇹", "UK": "🇬🇧",
-    "United Kingdom": "🇬🇧", "Belgium": "🇧🇪", "Hungary": "🇭🇺",
-    "Netherlands": "🇳🇱", "Italy": "🇮🇹", "Azerbaijan": "🇦🇿",
-    "Singapore": "🇸🇬", "Mexico": "🇲🇽", "Brazil": "🇧🇷",
-    "UAE": "🇦🇪", "United Arab Emirates": "🇦🇪", "Qatar": "🇶🇦",
+    "Australia": "🇦🇺",
+    "China": "🇨🇳",
+    "Japan": "🇯🇵",
+    "Bahrain": "🇧🇭",
+    "Saudi Arabia": "🇸🇦",
+    "USA": "🇺🇸",
+    "United States": "🇺🇸",
+    "Canada": "🇨🇦",
+    "Monaco": "🇲🇨",
+    "Spain": "🇪🇸",
+    "Austria": "🇦🇹",
+    "UK": "🇬🇧",
+    "United Kingdom": "🇬🇧",
+    "Belgium": "🇧🇪",
+    "Hungary": "🇭🇺",
+    "Netherlands": "🇳🇱",
+    "Italy": "🇮🇹",
+    "Azerbaijan": "🇦🇿",
+    "Singapore": "🇸🇬",
+    "Mexico": "🇲🇽",
+    "Brazil": "🇧🇷",
+    "UAE": "🇦🇪",
+    "United Arab Emirates": "🇦🇪",
+    "Qatar": "🇶🇦",
 }
 
 POSITION_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -101,18 +118,15 @@ def format_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
     for race in upcoming:
         flag = _flag(race.circuit.location.country)
         sprint_tag = " 🏃 冲刺赛周末" if race.is_sprint_weekend else ""
-        lines.append(
-            f"第{race.round}站{sprint_tag}\n"
-            f"{flag} {race.race_name}"
-        )
+        lines.append(f"第{race.round}站{sprint_tag}\n{flag} {race.race_name}")
 
         session_slots: list[tuple[JolpicaSessionSchedule | None, str]] = [
-            (race.first_practice,    "FP1 练习赛"),
+            (race.first_practice, "FP1 练习赛"),
             (race.sprint_qualifying, "冲刺排位"),
-            (race.second_practice,  "FP2 练习赛"),
-            (race.sprint,            "冲刺赛"),
-            (race.third_practice,   "FP3 练习赛"),
-            (race.qualifying,        "排位赛"),
+            (race.second_practice, "FP2 练习赛"),
+            (race.sprint, "冲刺赛"),
+            (race.third_practice, "FP3 练习赛"),
+            (race.qualifying, "排位赛"),
         ]
         for slot, label in session_slots:
             t = _session_cst(slot)
@@ -132,12 +146,12 @@ def format_next_race(race: JolpicaRace) -> str:
     locality = race.circuit.location.locality
 
     session_slots: list[tuple[JolpicaSessionSchedule | None, str]] = [
-        (race.first_practice,    "FP1"),
+        (race.first_practice, "FP1"),
         (race.sprint_qualifying, "冲刺排位"),
-        (race.second_practice,  "FP2"),
-        (race.sprint,            "冲刺赛"),
-        (race.third_practice,   "FP3"),
-        (race.qualifying,        "排位赛"),
+        (race.second_practice, "FP2"),
+        (race.sprint, "冲刺赛"),
+        (race.third_practice, "FP3"),
+        (race.qualifying, "排位赛"),
     ]
 
     lines = [
@@ -242,7 +256,9 @@ def format_starting_grid(
     lines = ["🏁 发车顺序\n"]
     for entry in grid:
         pos = entry.position
-        drv = drivers_by_number.get(entry.driver_number, OpenF1Driver(driver_number=entry.driver_number))
+        drv = drivers_by_number.get(
+            entry.driver_number, OpenF1Driver(driver_number=entry.driver_number)
+        )
         medal = _medal(pos)
         lines.append(f"{medal} {drv.display_name} ({drv.team_name or ''})")
     return "\n".join(lines)
@@ -250,11 +266,7 @@ def format_starting_grid(
 
 def format_weekend_start(race: JolpicaRace) -> str:
     """Notification sent when a race weekend is about to begin."""
-    return (
-        "🏎 F1 赛车周末即将开始！\n\n"
-        + format_next_race(race)
-        + "\n\n加油！🏁"
-    )
+    return "🏎 F1 赛车周末即将开始！\n\n" + format_next_race(race) + "\n\n加油！🏁"
 
 
 def format_practice_result(
@@ -278,7 +290,9 @@ def format_practice_result(
 
     for entry in results:
         pos = entry.position
-        drv = drivers_by_number.get(entry.driver_number, OpenF1Driver(driver_number=entry.driver_number))
+        drv = drivers_by_number.get(
+            entry.driver_number, OpenF1Driver(driver_number=entry.driver_number)
+        )
         lap_time = _format_lap_duration(entry.duration) if entry.duration else "-"
         match entry.gap_to_leader:
             case float(g) | int(g) if g > 0:

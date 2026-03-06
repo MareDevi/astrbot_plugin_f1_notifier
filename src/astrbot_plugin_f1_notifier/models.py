@@ -11,8 +11,8 @@ All models use ``extra="ignore"`` so unknown API fields are silently dropped.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Generic, TypeVar
-from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ── ApiResult ─────────────────────────────────────────────────────────────────
 
@@ -198,15 +198,9 @@ class JolpicaRace(BaseModel):
     time: str = ""
 
     # Optional sub-sessions (only present when the round has them)
-    first_practice: JolpicaSessionSchedule | None = Field(
-        None, alias="FirstPractice"
-    )
-    second_practice: JolpicaSessionSchedule | None = Field(
-        None, alias="SecondPractice"
-    )
-    third_practice: JolpicaSessionSchedule | None = Field(
-        None, alias="ThirdPractice"
-    )
+    first_practice: JolpicaSessionSchedule | None = Field(None, alias="FirstPractice")
+    second_practice: JolpicaSessionSchedule | None = Field(None, alias="SecondPractice")
+    third_practice: JolpicaSessionSchedule | None = Field(None, alias="ThirdPractice")
     sprint_qualifying: JolpicaSessionSchedule | None = Field(
         None, alias="SprintQualifying"
     )
@@ -313,7 +307,7 @@ class OpenF1SessionResult(BaseModel):
 
     position: int = 99
     driver_number: int = 0
-    duration: float | None = None       # best lap in seconds
+    duration: float | None = None  # best lap in seconds
     gap_to_leader: float | None = None
     number_of_laps: int | None = None
 
@@ -336,10 +330,13 @@ class OpenF1Meeting(BaseModel):
 
 if TYPE_CHECKING:
     from typing import TypeAlias
+
     ScheduleResult: TypeAlias = Success[list[JolpicaRace]] | Failure
     RaceResult: TypeAlias = Success[JolpicaRace] | Failure
     StandingsResult: TypeAlias = Success[list[JolpicaDriverStanding]] | Failure
-    ConstructorStandingsResult: TypeAlias = Success[list[JolpicaConstructorStanding]] | Failure
+    ConstructorStandingsResult: TypeAlias = (
+        Success[list[JolpicaConstructorStanding]] | Failure
+    )
     SessionResult: TypeAlias = Success[OpenF1Session] | Failure
     SessionResultsResult: TypeAlias = Success[list[OpenF1SessionResult]] | Failure
     DriversResult: TypeAlias = Success[list[OpenF1Driver]] | Failure

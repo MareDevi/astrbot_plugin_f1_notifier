@@ -7,6 +7,6 @@ Public submodules:
   - scheduler: Background notification scheduler
 """
 
-from . import models, api, formatter, scheduler
+from . import api, formatter, models, scheduler
 
 __all__ = ["models", "api", "formatter", "scheduler"]

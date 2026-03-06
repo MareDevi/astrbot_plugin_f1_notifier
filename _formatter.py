@@ -278,8 +278,8 @@ def format_practice_result(
         team = drv.get("team_name", "")
         duration = entry.get("duration")
         lap_time = _format_lap_duration(duration) if duration else "-"
-        gap = entry.get("gap_to_leader", 0)
-        gap_str = "" if gap == 0 else f"  +{gap:.3f}s"
+        gap = entry.get("gap_to_leader")
+        gap_str = "" if not gap else f"  +{gap:.3f}s"
         medal = POSITION_MEDALS.get(int(pos) if str(pos).isdigit() else 99, f" {pos:>2}.")
         lines.append(f"{medal} {name} ({team})\n       ⏱ {lap_time}{gap_str}")
 

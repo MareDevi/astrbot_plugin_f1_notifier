@@ -86,7 +86,7 @@ def race_utc(race: JolpicaRace) -> datetime | None:
 
 
 def format_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
-    """Format upcoming race schedule."""
+    """Format upcoming race schedule with all session times."""
     now = datetime.now(timezone.utc)
     upcoming: list[JolpicaRace] = []
     for race in races:
@@ -101,13 +101,27 @@ def format_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
     lines = [f"📅 F1 {upcoming[0].season} 赛季 · 近期赛程\n"]
     for race in upcoming:
         flag = _flag(race.circuit.location.country)
-        race_time = _utc_to_cst(race.date, race.time)
         sprint_tag = " 🏃 冲刺赛周末" if race.is_sprint_weekend else ""
         lines.append(
-            f"  第{race.round}站{sprint_tag}\n"
-            f"  {flag} {race.race_name}\n"
-            f"  🏎 正赛: {race_time} (CST)\n"
+            f"第{race.round}站{sprint_tag}\n"
+            f"{flag} {race.race_name}"
         )
+
+        session_slots: list[tuple[Optional[JolpicaSessionSchedule], str]] = [
+            (race.first_practice,    "FP1 练习赛"),
+            (race.sprint_qualifying, "冲刺排位"),
+            (race.second_practice,  "FP2 练习赛"),
+            (race.sprint,            "冲刺赛"),
+            (race.third_practice,   "FP3 练习赛"),
+            (race.qualifying,        "排位赛"),
+        ]
+        for slot, label in session_slots:
+            t = _session_cst(slot)
+            if t:
+                lines.append(f"  {label}: {t}")
+
+        race_time = _utc_to_cst(race.date, race.time)
+        lines.append(f"  ✅ 正赛: {race_time} (CST)\n")
     return "\n".join(lines)
 
 

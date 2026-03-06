@@ -1,3 +1,12 @@
+## [1.1.0] - 2026-03-06
+
+### 🚀 Features
+
+- Add headshot and team color to OpenF1Driver model; enhance F1Scheduler to support image broadcasting
+
+### ⚙️ Miscellaneous Tasks
+
+- Update CHANGELOG for version 1.0.2 and improve error handling in API and scheduler
 ## [1.0.2] - 2026-03-06
 
 ### 🚀 Features

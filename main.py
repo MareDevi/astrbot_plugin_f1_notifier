@@ -58,7 +58,7 @@ HELP_TEXT = """🏎 F1 Notifier 指令列表
     "astrbot_plugin_f1_notifier",
     "MareDevi",
     "F1赛事推送与查询插件",
-    "1.0.2",
+    "1.1.0",
     "https://github.com/MareDevi/astrbot_plugin_f1_notifier",
 )
 class F1NotifierPlugin(Star):

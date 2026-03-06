@@ -669,11 +669,35 @@ class TestRunCancelledErrorCoversLoop(unittest.TestCase):
             func_body,
             re.DOTALL,
         )
-        self.assertIsNotNone(try_cancelled,
-                             "try...except asyncio.CancelledError block not found")
+        self.assertIsNotNone(
+            try_cancelled,
+            "try...except asyncio.CancelledError block not found",
+        )
         try_body = try_cancelled.group(1)
-        self.assertIn("asyncio.sleep", try_body,
-                       "asyncio.sleep must be inside the CancelledError try block")
+        self.assertIn(
+            "asyncio.sleep",
+            try_body,
+            "asyncio.sleep must be inside the CancelledError try block",
+        )
+
+        # Additionally ensure there are no unprotected asyncio.sleep calls
+        # inside generic except Exception handlers in _run.
+        # The regex captures the full except Exception block (including nested blocks).
+        for exc_match in re.finditer(
+            r'except Exception[^\n]*:(.*?)(?=\n            except |\n    async def |\nclass |\Z)',
+            func_body,
+            re.DOTALL,
+        ):
+            exc_body = exc_match.group(1)
+            if "asyncio.sleep" in exc_body:
+                # If asyncio.sleep appears, it must be inside a nested
+                # try...except asyncio.CancelledError block.
+                self.assertRegex(
+                    exc_body,
+                    r'try:[\s\S]*?asyncio\.sleep[\s\S]*?except asyncio\.CancelledError',
+                    "asyncio.sleep in 'except Exception' block must be protected "
+                    "by a nested try...except asyncio.CancelledError",
+                )
 
 
 if __name__ == "__main__":

@@ -214,7 +214,10 @@ class F1Scheduler:
                 logger.error(f"[F1Notifier] Scheduler error: {e}", exc_info=True)
                 elapsed = loop.time() - start
                 sleep_time = max(MIN_ERROR_SLEEP, POLL_INTERVAL - elapsed)
-                await asyncio.sleep(sleep_time)
+                try:
+                    await asyncio.sleep(sleep_time)
+                except asyncio.CancelledError:
+                    break
 
     async def _check_and_notify(self) -> None:
         if not self._subscribers:

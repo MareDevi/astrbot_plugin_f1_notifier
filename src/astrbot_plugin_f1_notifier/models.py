@@ -2,15 +2,15 @@
 
 Design mirrors the Rust pattern:
   - serde_json  →  Pydantic model_validate()
-  - Result<T,E> →  ApiResult = Union[Success[T], Failure]
-  - Option<T>   →  Optional[T] with None as default
+  - Result<T,E> →  ApiResult = Success[T] | Failure
+  - Option<T>   →  T | None with None as default
 
 All models use ``extra="ignore"`` so unknown API fields are silently dropped.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Generic, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -35,7 +35,7 @@ class Failure(BaseModel):
 
 # ``ApiResult[T]`` is the return type of every public API function.
 # Callers use ``match result: case Success(value=...): case Failure(error=...):``
-ApiResult = Union[Success[T], Failure]
+ApiResult = Success[T] | Failure
 
 
 # ── Shared config ──────────────────────────────────────────────────────────────
@@ -72,8 +72,8 @@ class JolpicaTime(BaseModel):
 
     model_config = _CFG
 
-    millis: Optional[str] = None
-    time: Optional[str] = None
+    millis: str | None = None
+    time: str | None = None
 
 
 class JolpicaFastestLap(BaseModel):
@@ -81,7 +81,7 @@ class JolpicaFastestLap(BaseModel):
 
     rank: str = ""
     lap: str = ""
-    time: Optional[JolpicaTime] = None
+    time: JolpicaTime | None = None
 
 
 class JolpicaRaceResult(BaseModel):
@@ -98,8 +98,8 @@ class JolpicaRaceResult(BaseModel):
     grid: str = ""
     laps: str = ""
     status: str = ""
-    time: Optional[JolpicaTime] = Field(None, alias="Time")
-    fastest_lap: Optional[JolpicaFastestLap] = Field(None, alias="FastestLap")
+    time: JolpicaTime | None = Field(None, alias="Time")
+    fastest_lap: JolpicaFastestLap | None = Field(None, alias="FastestLap")
 
     @property
     def pos_int(self) -> int:
@@ -149,7 +149,7 @@ class JolpicaSprintResult(BaseModel):
     grid: str = ""
     laps: str = ""
     status: str = ""
-    time: Optional[JolpicaTime] = Field(None, alias="Time")
+    time: JolpicaTime | None = Field(None, alias="Time")
 
     @property
     def pos_int(self) -> int:
@@ -198,20 +198,20 @@ class JolpicaRace(BaseModel):
     time: str = ""
 
     # Optional sub-sessions (only present when the round has them)
-    first_practice: Optional[JolpicaSessionSchedule] = Field(
+    first_practice: JolpicaSessionSchedule | None = Field(
         None, alias="FirstPractice"
     )
-    second_practice: Optional[JolpicaSessionSchedule] = Field(
+    second_practice: JolpicaSessionSchedule | None = Field(
         None, alias="SecondPractice"
     )
-    third_practice: Optional[JolpicaSessionSchedule] = Field(
+    third_practice: JolpicaSessionSchedule | None = Field(
         None, alias="ThirdPractice"
     )
-    sprint_qualifying: Optional[JolpicaSessionSchedule] = Field(
+    sprint_qualifying: JolpicaSessionSchedule | None = Field(
         None, alias="SprintQualifying"
     )
-    sprint: Optional[JolpicaSessionSchedule] = Field(None, alias="Sprint")
-    qualifying: Optional[JolpicaSessionSchedule] = Field(None, alias="Qualifying")
+    sprint: JolpicaSessionSchedule | None = Field(None, alias="Sprint")
+    qualifying: JolpicaSessionSchedule | None = Field(None, alias="Qualifying")
 
     # Results (only present when fetched via results / qualifying / sprint endpoints)
     race_results: list[JolpicaRaceResult] = Field([], alias="Results")
@@ -290,10 +290,10 @@ class OpenF1Driver(BaseModel):
     model_config = _CFG
 
     driver_number: int = 0
-    full_name: Optional[str] = None
-    last_name: Optional[str] = None
-    name_acronym: Optional[str] = None
-    team_name: Optional[str] = None
+    full_name: str | None = None
+    last_name: str | None = None
+    name_acronym: str | None = None
+    team_name: str | None = None
 
     @property
     def display_name(self) -> str:
@@ -313,9 +313,9 @@ class OpenF1SessionResult(BaseModel):
 
     position: int = 99
     driver_number: int = 0
-    duration: Optional[float] = None       # best lap in seconds
-    gap_to_leader: Optional[float] = None
-    number_of_laps: Optional[int] = None
+    duration: float | None = None       # best lap in seconds
+    gap_to_leader: float | None = None
+    number_of_laps: int | None = None
 
 
 class OpenF1Meeting(BaseModel):
@@ -336,12 +336,12 @@ class OpenF1Meeting(BaseModel):
 
 if TYPE_CHECKING:
     from typing import TypeAlias
-    ScheduleResult: TypeAlias = Union[Success[list[JolpicaRace]], Failure]
-    RaceResult: TypeAlias = Union[Success[JolpicaRace], Failure]
-    StandingsResult: TypeAlias = Union[Success[list[JolpicaDriverStanding]], Failure]
-    ConstructorStandingsResult: TypeAlias = Union[Success[list[JolpicaConstructorStanding]], Failure]
-    SessionResult: TypeAlias = Union[Success[OpenF1Session], Failure]
-    SessionResultsResult: TypeAlias = Union[Success[list[OpenF1SessionResult]], Failure]
-    DriversResult: TypeAlias = Union[Success[list[OpenF1Driver]], Failure]
-    GridResult: TypeAlias = Union[Success[list[OpenF1Position]], Failure]
-    MeetingResult: TypeAlias = Union[Success[OpenF1Meeting], Failure]
+    ScheduleResult: TypeAlias = Success[list[JolpicaRace]] | Failure
+    RaceResult: TypeAlias = Success[JolpicaRace] | Failure
+    StandingsResult: TypeAlias = Success[list[JolpicaDriverStanding]] | Failure
+    ConstructorStandingsResult: TypeAlias = Success[list[JolpicaConstructorStanding]] | Failure
+    SessionResult: TypeAlias = Success[OpenF1Session] | Failure
+    SessionResultsResult: TypeAlias = Success[list[OpenF1SessionResult]] | Failure
+    DriversResult: TypeAlias = Success[list[OpenF1Driver]] | Failure
+    GridResult: TypeAlias = Success[list[OpenF1Position]] | Failure
+    MeetingResult: TypeAlias = Success[OpenF1Meeting] | Failure

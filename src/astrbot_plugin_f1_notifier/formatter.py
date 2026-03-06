@@ -8,7 +8,6 @@ Times are converted from UTC to Asia/Shanghai (UTC+8) for display.
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
 from .models import (
     JolpicaRace,
@@ -57,7 +56,7 @@ def _utc_to_cst(date_str: str, time_str: str) -> str:
         return f"{date_str} {time_str}"
 
 
-def _session_cst(s: Optional[JolpicaSessionSchedule]) -> str | None:
+def _session_cst(s: JolpicaSessionSchedule | None) -> str | None:
     """Return formatted CST time for an optional weekend session slot."""
     if s is None:
         return None
@@ -107,7 +106,7 @@ def format_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
             f"{flag} {race.race_name}"
         )
 
-        session_slots: list[tuple[Optional[JolpicaSessionSchedule], str]] = [
+        session_slots: list[tuple[JolpicaSessionSchedule | None, str]] = [
             (race.first_practice,    "FP1 练习赛"),
             (race.sprint_qualifying, "冲刺排位"),
             (race.second_practice,  "FP2 练习赛"),
@@ -132,7 +131,7 @@ def format_next_race(race: JolpicaRace) -> str:
     circuit = race.circuit.circuit_name
     locality = race.circuit.location.locality
 
-    session_slots: list[tuple[Optional[JolpicaSessionSchedule], str]] = [
+    session_slots: list[tuple[JolpicaSessionSchedule | None, str]] = [
         (race.first_practice,    "FP1"),
         (race.sprint_qualifying, "冲刺排位"),
         (race.second_practice,  "FP2"),

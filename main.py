@@ -122,9 +122,9 @@ class F1NotifierPlugin(Star):
                 yield event.plain_result("❌ 获取下一站信息失败，请稍后重试。")
 
     @f1.command("result")
-    async def f1_result(self, event: AstrMessageEvent, round: str = "last"):
+    async def f1_result(self, event: AstrMessageEvent, round_num: str = "last"):
         """查看正赛结果，可指定站次 round"""
-        round_arg: int | str = int(round) if round.isdigit() else "last"
+        round_arg: int | str = int(round_num) if round_num.isdigit() else "last"
         result = await api.get_race_result(round_arg)
         match result:
             case Success(value=race) if race.race_results:
@@ -136,9 +136,9 @@ class F1NotifierPlugin(Star):
                 yield event.plain_result("❌ 获取比赛结果失败，请稍后重试。")
 
     @f1.command("qualifying")
-    async def f1_qualifying(self, event: AstrMessageEvent, round: str = "last"):
+    async def f1_qualifying(self, event: AstrMessageEvent, round_num: str = "last"):
         """查看排位赛结果，可指定站次 round"""
-        round_arg: int | str = int(round) if round.isdigit() else "last"
+        round_arg: int | str = int(round_num) if round_num.isdigit() else "last"
         result = await api.get_qualifying_result(round_arg)
         match result:
             case Success(value=race) if race.qualifying_results:
@@ -150,9 +150,9 @@ class F1NotifierPlugin(Star):
                 yield event.plain_result("❌ 获取排位赛结果失败，请稍后重试。")
 
     @f1.command("sprint")
-    async def f1_sprint(self, event: AstrMessageEvent, round: str = "last"):
+    async def f1_sprint(self, event: AstrMessageEvent, round_num: str = "last"):
         """查看冲刺赛结果，可指定站次 round"""
-        round_arg: int | str = int(round) if round.isdigit() else "last"
+        round_arg: int | str = int(round_num) if round_num.isdigit() else "last"
         result = await api.get_sprint_result(round_arg)
         match result:
             case Success(value=race) if race.sprint_results:
@@ -199,9 +199,9 @@ class F1NotifierPlugin(Star):
                         yield event.plain_result("❌ 获取练习赛数据失败，请稍后重试。")
 
     @f1.command("standings")
-    async def f1_standings(self, event: AstrMessageEvent, type: str = "drivers"):
-        """查看积分榜。type: drivers（默认）或 teams"""
-        match type.lower():
+    async def f1_standings(self, event: AstrMessageEvent, category: str = "drivers"):
+        """查看积分榜。category: drivers（默认）或 teams"""
+        match category.lower():
             case "teams" | "constructors" | "team" | "车队":
                 result = await api.get_constructor_standings()
                 match result:

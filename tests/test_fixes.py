@@ -506,5 +506,114 @@ class TestSchedulerErrorBackoff(unittest.TestCase):
         self.assertNotIn("continue", before_sleep)
 
 
+# ---------------------------------------------------------------------------
+# 16. No _gather wrapper in main.py
+# ---------------------------------------------------------------------------
+
+class TestNoGatherWrapper(unittest.TestCase):
+    """Verify main.py does not define the redundant _gather wrapper."""
+
+    def test_no_gather_function_definition(self):
+        """Ensure no 'async def _gather' exists in main.py."""
+        source = _MAIN_SRC.read_text(encoding='utf-8')
+        self.assertNotIn("async def _gather", source)
+
+    def test_no_asyncio_alias(self):
+        """Ensure asyncio is not imported under an alias."""
+        source = _MAIN_SRC.read_text(encoding='utf-8')
+        self.assertNotIn("import asyncio as", source)
+
+    def test_uses_asyncio_gather_directly(self):
+        """Ensure asyncio.gather is used directly in main.py."""
+        source = _MAIN_SRC.read_text(encoding='utf-8')
+        self.assertIn("asyncio.gather", source)
+
+
+# ---------------------------------------------------------------------------
+# 17. Concurrent API calls in f1_test
+# ---------------------------------------------------------------------------
+
+class TestConcurrentTestCalls(unittest.TestCase):
+    """Verify f1_test runs API calls concurrently, not serially."""
+
+    def test_f1_test_uses_gather(self):
+        """Ensure f1_test uses asyncio.gather to run tests concurrently."""
+        source = _MAIN_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def f1_test.*?(?=\n    @|\nclass |\n# |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("asyncio.gather", func_body)
+
+    def test_f1_test_no_serial_await_run(self):
+        """Ensure f1_test does not use serial 'await run(...)' calls."""
+        source = _MAIN_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def f1_test.*?(?=\n    @|\nclass |\n# |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        # Should NOT have multiple standalone 'await run(...)' lines
+        serial_calls = re.findall(r'^\s+await run\(', func_body, re.MULTILINE)
+        self.assertEqual(serial_calls, [], f"Found serial await run() calls: {serial_calls}")
+
+
+# ---------------------------------------------------------------------------
+# 18. Scheduler concurrent API calls
+# ---------------------------------------------------------------------------
+
+class TestSchedulerConcurrentCalls(unittest.TestCase):
+    """Verify scheduler uses asyncio.gather for independent API requests."""
+
+    def test_practice_sessions_use_gather(self):
+        """Ensure _check_practice_sessions uses asyncio.gather for results + drivers."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def _check_practice_sessions.*?(?=\n    async def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("asyncio.gather", func_body)
+
+    def test_pre_race_uses_gather(self):
+        """Ensure _check_pre_race uses asyncio.gather for drivers + grid."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def _check_pre_race.*?(?=\n    async def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("asyncio.gather", func_body)
+
+
+# ---------------------------------------------------------------------------
+# 19. Broadcast semaphore limiting concurrency
+# ---------------------------------------------------------------------------
+
+class TestBroadcastSemaphore(unittest.TestCase):
+    """Verify _broadcast uses a Semaphore to limit concurrent sends."""
+
+    def test_broadcast_uses_semaphore(self):
+        """Ensure _broadcast creates and uses an asyncio.Semaphore."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def _broadcast.*?(?=\n    [a-z@]|\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("asyncio.Semaphore", func_body)
+        self.assertIn("async with sem", func_body)
+
+    def test_broadcast_concurrency_constant_exists(self):
+        """Ensure BROADCAST_CONCURRENCY constant is defined."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        self.assertIn("BROADCAST_CONCURRENCY", source)
+
+    def test_broadcast_still_uses_copy(self):
+        """Ensure _broadcast still iterates over a snapshot copy of subscribers."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def _broadcast.*?(?=\n    [a-z@]|\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("self._subscribers.copy()", func_body)
+
+
 if __name__ == "__main__":
     unittest.main()

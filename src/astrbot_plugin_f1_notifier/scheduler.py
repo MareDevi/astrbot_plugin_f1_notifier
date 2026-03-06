@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 POLL_INTERVAL = 60          # seconds
 MIN_ERROR_SLEEP = 10        # minimum sleep after an error (anti-avalanche)
+BROADCAST_CONCURRENCY = 5   # max concurrent sends in _broadcast
 WEEKEND_START_THRESHOLD = timedelta(hours=24)  # notify 24 h before first session
 PRE_RACE_THRESHOLD = timedelta(minutes=30)     # notify 30 min before race
 
@@ -121,21 +122,23 @@ class F1Scheduler:
         await self._persist_state()
 
     async def _broadcast(self, text: str) -> None:
-        """Send message to all subscribers concurrently."""
+        """Send message to all subscribers with limited concurrency."""
         from astrbot.core.message.message_event_result import MessageChain
         from astrbot.api.message_components import Plain
 
         if not self._subscribers:
             return
         chain = MessageChain([Plain(text)])
+        sem = asyncio.Semaphore(BROADCAST_CONCURRENCY)
 
         async def _send(session_str: str) -> None:
-            try:
-                ok = await self.ctx.send_message(session_str, chain)
-                if not ok:
-                    logger.warning(f"[F1Notifier] Failed to send to {session_str}")
-            except Exception as e:
-                logger.error(f"[F1Notifier] Broadcast error to {session_str}: {e}")
+            async with sem:
+                try:
+                    ok = await self.ctx.send_message(session_str, chain)
+                    if not ok:
+                        logger.warning(f"[F1Notifier] Failed to send to {session_str}")
+                except Exception as e:
+                    logger.error(f"[F1Notifier] Broadcast error to {session_str}: {e}")
 
         await asyncio.gather(*[_send(s) for s in self._subscribers.copy()])
 
@@ -281,8 +284,10 @@ class F1Scheduler:
                                 )
                                 continue
                             sk = of1_session.session_key
-                            results_res = await api.get_session_result(sk)
-                            drivers_res = await api.get_drivers_for_session(sk)
+                            results_res, drivers_res = await asyncio.gather(
+                                api.get_session_result(sk),
+                                api.get_drivers_for_session(sk),
+                            )
                             match (results_res, drivers_res):
                                 case (Success(value=results), Success(value=drivers_list)) if results:
                                     drivers_by_num = {d.driver_number: d for d in drivers_list}
@@ -338,8 +343,10 @@ class F1Scheduler:
         match session_res:
             case Success(value=session):
                 sk = session.session_key
-                drivers_res = await api.get_drivers_for_session(sk)
-                grid_res = await api.get_starting_grid(sk)
+                drivers_res, grid_res = await asyncio.gather(
+                    api.get_drivers_for_session(sk),
+                    api.get_starting_grid(sk),
+                )
                 match (drivers_res, grid_res):
                     case (Success(value=drivers_list), Success(value=grid)) if grid:
                         drivers_by_num = {d.driver_number: d for d in drivers_list}

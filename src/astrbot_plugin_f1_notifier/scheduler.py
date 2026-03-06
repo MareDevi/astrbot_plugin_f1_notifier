@@ -25,9 +25,11 @@ from astrbot.api import logger
 
 from . import api
 from . import formatter as fmt
+from . import image_renderer as img
 from .models import Failure, JolpicaRace, JolpicaSessionSchedule, OpenF1Session, Success
 
 if TYPE_CHECKING:
+    from astrbot.api import AstrBotConfig
     from astrbot.api.star import Star
     from astrbot.core.star.context import Context
 
@@ -46,13 +48,24 @@ def _default_state() -> dict:
 class F1Scheduler:
     """Manages automated F1 push notifications."""
 
-    def __init__(self, star: Star, context: Context) -> None:
+    def __init__(
+        self, star: Star, context: Context, config: AstrBotConfig | None = None
+    ) -> None:
         self.ctx = context
         self._star = star
+        self._config = config
         self._subscribers: list[str] = []
         self._state: dict = _default_state()
         self._task: asyncio.Task | None = None
         self._loaded = False
+
+    @property
+    def _image_mode(self) -> bool:
+        return (
+            bool(self._config.get("enable_image_render", False))
+            if self._config
+            else False
+        )
 
     # ──────────────── public interface ────────────────
 
@@ -125,14 +138,31 @@ class F1Scheduler:
             self._state["notified_events"].append(event)
         await self._persist_state()
 
-    async def _broadcast(self, text: str) -> None:
-        """Send message to all subscribers with limited concurrency."""
-        from astrbot.api.message_components import Plain
+    async def _broadcast(self, text: str, image_path: str | None = None) -> None:
+        """Send message to all subscribers with limited concurrency.
+
+        If image mode is enabled and image_path is provided, sends the
+        image. Falls back to plain text on failure.
+        """
+        from astrbot.api.message_components import Image, Plain
         from astrbot.core.message.message_event_result import MessageChain
 
         if not self._subscribers:
             return
-        chain = MessageChain([Plain(text)])
+
+        # Try image if enabled
+        chain = None
+        if self._image_mode and image_path is not None:
+            try:
+                chain = MessageChain([Image.fromFileSystem(image_path)])
+            except Exception as e:
+                logger.warning(
+                    f"[F1Notifier] Broadcast image failed, fallback to text: {e}"
+                )
+
+        if chain is None:
+            chain = MessageChain([Plain(text)])
+
         sem = asyncio.Semaphore(BROADCAST_CONCURRENCY)
 
         async def _send(session_str: str) -> None:
@@ -255,7 +285,8 @@ class F1Scheduler:
         if timedelta(0) <= delta <= WEEKEND_START_THRESHOLD:
             if not self._notified(round_num, "weekend_start"):
                 msg = fmt.format_weekend_start(next_race)
-                await self._broadcast(msg)
+                image_path = img.render_weekend_start(next_race)
+                await self._broadcast(msg, image_path)
                 await self._mark_notified(round_num, "weekend_start")
                 logger.info(f"[F1Notifier] Sent weekend_start for round {round_num}")
 
@@ -305,7 +336,14 @@ class F1Scheduler:
                                     msg = fmt.format_practice_result(
                                         of1_session, results, drivers_by_num, fp_num
                                     )
-                                    await self._broadcast(msg)
+                                    image_path = img.render_practice_result(
+                                        of1_session,
+                                        results,
+                                        drivers_by_num,
+                                        fp_num,
+                                        circuit_id=next_race.circuit.circuit_id,
+                                    )
+                                    await self._broadcast(msg, image_path)
                                     await self._mark_notified(round_num, event_key)
                                     logger.info(
                                         f"[F1Notifier] Sent {event_key} for round {round_num}"
@@ -342,7 +380,8 @@ class F1Scheduler:
                 match qual_res:
                     case Success(value=race) if race.qualifying_results:
                         msg = fmt.format_qualifying_result(race)
-                        await self._broadcast(msg)
+                        image_path = img.render_qualifying_result(race)
+                        await self._broadcast(msg, image_path)
                         await self._mark_notified(round_num, "qualifying_result")
                         logger.info(
                             f"[F1Notifier] Sent qualifying_result for round {round_num}"
@@ -367,6 +406,7 @@ class F1Scheduler:
             return
 
         session_res = await api.get_latest_session("Race")
+        image_path: str | None = None
         match session_res:
             case Success(value=session):
                 sk = session.session_key
@@ -378,12 +418,19 @@ class F1Scheduler:
                     case (Success(value=drivers_list), Success(value=grid)) if grid:
                         drivers_by_num = {d.driver_number: d for d in drivers_list}
                         msg = fmt.format_starting_grid(drivers_by_num, grid)
+                        image_path = img.render_starting_grid(
+                            drivers_by_num,
+                            grid,
+                            circuit_id=next_race.circuit.circuit_id,
+                        )
                     case _:
                         msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
+                        image_path = img.render_next_race(next_race)
             case Failure():
                 msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
+                image_path = img.render_next_race(next_race)
 
-        await self._broadcast(msg)
+        await self._broadcast(msg, image_path)
         await self._mark_notified(round_num, "pre_race")
         logger.info(f"[F1Notifier] Sent pre_race for round {round_num}")
 
@@ -407,7 +454,8 @@ class F1Scheduler:
             match race_res:
                 case Success(value=race) if race.race_results:
                     msg = fmt.format_race_result(race)
-                    await self._broadcast(msg)
+                    image_path = img.render_race_result(race)
+                    await self._broadcast(msg, image_path)
                     await self._mark_notified(lf_round, "race_result")
                     logger.info(f"[F1Notifier] Sent race_result for round {lf_round}")
                 case Failure(error=err):
@@ -423,7 +471,8 @@ class F1Scheduler:
                     match sprint_res:
                         case Success(value=race) if race.sprint_results:
                             msg = fmt.format_sprint_result(race)
-                            await self._broadcast(msg)
+                            image_path = img.render_sprint_result(race)
+                            await self._broadcast(msg, image_path)
                             await self._mark_notified(lf_round, "sprint_result")
                             logger.info(
                                 f"[F1Notifier] Sent sprint_result for round {lf_round}"

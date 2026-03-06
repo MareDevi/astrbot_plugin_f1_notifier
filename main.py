@@ -21,12 +21,13 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
 from .src.astrbot_plugin_f1_notifier import api
 from .src.astrbot_plugin_f1_notifier import formatter as fmt
+from .src.astrbot_plugin_f1_notifier import image_renderer as img
 from .src.astrbot_plugin_f1_notifier.models import Failure, Success
 from .src.astrbot_plugin_f1_notifier.scheduler import F1Scheduler
 
@@ -61,9 +62,27 @@ HELP_TEXT = """🏎 F1 Notifier 指令列表
     "https://github.com/MareDevi/astrbot_plugin_f1_notifier",
 )
 class F1NotifierPlugin(Star):
-    def __init__(self, context: Context) -> None:
+    def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
-        self.scheduler = F1Scheduler(self, context)
+        self.config = config
+        self.scheduler = F1Scheduler(self, context, config)
+
+    @property
+    def _image_mode(self) -> bool:
+        return bool(self.config.get("enable_image_render", False))
+
+    async def _render_or_text(
+        self, event: AstrMessageEvent, text: str, image_path: str
+    ):
+        """Yield image result if image mode is on, otherwise plain text."""
+        if self._image_mode:
+            try:
+                return event.image_result(image_path)
+            except Exception as e:
+                logger.warning(
+                    f"[F1Notifier] Image render failed, fallback to text: {e}"
+                )
+        return event.plain_result(text)
 
     async def initialize(self) -> None:
         """Start the background notification scheduler."""
@@ -94,7 +113,9 @@ class F1NotifierPlugin(Star):
         result = await api.get_current_schedule()
         match result:
             case Success(value=races):
-                yield event.plain_result(fmt.format_schedule(races))
+                text = fmt.format_schedule(races)
+                image_path = img.render_schedule(races)
+                yield await self._render_or_text(event, text, image_path)
             case Failure(error=err):
                 logger.error(f"[F1Notifier] /f1 schedule error: {err}")
                 yield event.plain_result("❌ 获取赛程失败，请稍后重试。")
@@ -117,7 +138,9 @@ class F1NotifierPlugin(Star):
                         "📅 本赛季剩余赛程已全部完成，期待下赛季！"
                     )
                 else:
-                    yield event.plain_result(fmt.format_next_race(next_race))
+                    text = fmt.format_next_race(next_race)
+                    image_path = img.render_next_race(next_race)
+                    yield await self._render_or_text(event, text, image_path)
             case Failure(error=err):
                 logger.error(f"[F1Notifier] /f1 next error: {err}")
                 yield event.plain_result("❌ 获取下一站信息失败，请稍后重试。")
@@ -129,7 +152,9 @@ class F1NotifierPlugin(Star):
         result = await api.get_race_result(round_arg)
         match result:
             case Success(value=race) if race.race_results:
-                yield event.plain_result(fmt.format_race_result(race))
+                text = fmt.format_race_result(race)
+                image_path = img.render_race_result(race)
+                yield await self._render_or_text(event, text, image_path)
             case Success():
                 yield event.plain_result("⏳ 正赛结果暂未公布，请比赛结束后再试。")
             case Failure(error=err):
@@ -143,7 +168,9 @@ class F1NotifierPlugin(Star):
         result = await api.get_qualifying_result(round_arg)
         match result:
             case Success(value=race) if race.qualifying_results:
-                yield event.plain_result(fmt.format_qualifying_result(race))
+                text = fmt.format_qualifying_result(race)
+                image_path = img.render_qualifying_result(race)
+                yield await self._render_or_text(event, text, image_path)
             case Success():
                 yield event.plain_result("⏳ 排位赛结果暂未公布，请稍后再试。")
             case Failure(error=err):
@@ -157,7 +184,9 @@ class F1NotifierPlugin(Star):
         result = await api.get_sprint_result(round_arg)
         match result:
             case Success(value=race) if race.sprint_results:
-                yield event.plain_result(fmt.format_sprint_result(race))
+                text = fmt.format_sprint_result(race)
+                image_path = img.render_sprint_result(race)
+                yield await self._render_or_text(event, text, image_path)
             case Success():
                 yield event.plain_result("⏳ 冲刺赛结果暂未公布，或该站无冲刺赛。")
             case Failure(error=err):
@@ -193,11 +222,13 @@ class F1NotifierPlugin(Star):
                         results
                     ):
                         drivers_by_num = {d.driver_number: d for d in drivers_list}
-                        yield event.plain_result(
-                            fmt.format_practice_result(
-                                of1_session, results, drivers_by_num, normalized
-                            )
+                        text = fmt.format_practice_result(
+                            of1_session, results, drivers_by_num, normalized
                         )
+                        image_path = img.render_practice_result(
+                            of1_session, results, drivers_by_num, normalized
+                        )
+                        yield await self._render_or_text(event, text, image_path)
                     case (Success(), Failure(error=err)):
                         logger.error(f"[F1Notifier] /f1 practice drivers error: {err}")
                         yield event.plain_result(
@@ -219,9 +250,9 @@ class F1NotifierPlugin(Star):
                 result = await api.get_constructor_standings()
                 match result:
                     case Success(value=standings):
-                        yield event.plain_result(
-                            fmt.format_constructor_standings(standings)
-                        )
+                        text = fmt.format_constructor_standings(standings)
+                        image_path = img.render_constructor_standings(standings)
+                        yield await self._render_or_text(event, text, image_path)
                     case Failure(error=err):
                         logger.error(f"[F1Notifier] /f1 standings teams error: {err}")
                         yield event.plain_result("❌ 获取车队积分榜失败，请稍后重试。")
@@ -229,7 +260,9 @@ class F1NotifierPlugin(Star):
                 result = await api.get_driver_standings()
                 match result:
                     case Success(value=standings):
-                        yield event.plain_result(fmt.format_driver_standings(standings))
+                        text = fmt.format_driver_standings(standings)
+                        image_path = img.render_driver_standings(standings)
+                        yield await self._render_or_text(event, text, image_path)
                     case Failure(error=err):
                         logger.error(f"[F1Notifier] /f1 standings drivers error: {err}")
                         yield event.plain_result("❌ 获取车手积分榜失败，请稍后重试。")

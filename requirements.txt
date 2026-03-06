@@ -1,0 +1,4 @@
+aiohttp
+cairosvg
+pillow
+pydantic

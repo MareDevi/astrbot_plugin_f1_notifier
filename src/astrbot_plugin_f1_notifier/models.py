@@ -288,6 +288,8 @@ class OpenF1Driver(BaseModel):
     last_name: str | None = None
     name_acronym: str | None = None
     team_name: str | None = None
+    headshot_url: str | None = None
+    team_colour: str | None = None
 
     @property
     def display_name(self) -> str:

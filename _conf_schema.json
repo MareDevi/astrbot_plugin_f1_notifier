@@ -1,0 +1,8 @@
+{
+  "enable_image_render": {
+    "description": "图片渲染模式",
+    "type": "bool",
+    "hint": "开启后，所有查询命令与推送通知将以仿F1官方风格的图片形式输出，而非纯文本。需要 Playwright 渲染环境支持。",
+    "default": false
+  }
+}

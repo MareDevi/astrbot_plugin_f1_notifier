@@ -54,14 +54,22 @@ except Exception:
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-CARD_W = 700
-HEADER_H = 80
-ROW_H = 56
-FOOTER_H = 36
-ROW_MARGIN_X = 12
-ROW_MARGIN_Y = 4
-ROW_RADIUS = 10
-TEAM_BAR_W = 4
+SCALE = 2  # render at 2× resolution for sharper images
+
+
+def _s(v: int | float) -> int:
+    """Scale a pixel value by the global SCALE factor."""
+    return int(v * SCALE)
+
+
+CARD_W = _s(700)
+HEADER_H = _s(80)
+ROW_H = _s(56)
+FOOTER_H = _s(36)
+ROW_MARGIN_X = _s(12)
+ROW_MARGIN_Y = _s(4)
+ROW_RADIUS = _s(10)
+TEAM_BAR_W = _s(4)
 
 # Colours
 BG_TOP = (21, 21, 30)  # #15151E
@@ -164,13 +172,14 @@ _font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 
 
 def _font(weight: str = "Bold", size: int = 14) -> ImageFont.FreeTypeFont:
-    """Load an Orbitron font variant, cached."""
-    key = (weight, size)
+    """Load an Orbitron font variant, cached. Font sizes are auto-scaled."""
+    scaled = _s(size)
+    key = (weight, scaled)
     if key not in _font_cache:
         path = _FONTS_DIR / f"Orbitron-{weight}.ttf"
         if not path.exists():
             path = _FONTS_DIR / "Orbitron-Regular.ttf"
-        _font_cache[key] = ImageFont.truetype(str(path), size)
+        _font_cache[key] = ImageFont.truetype(str(path), scaled)
     return _font_cache[key]
 
 
@@ -265,7 +274,7 @@ def _draw_flagged_text(
     text: str,
     font: ImageFont.FreeTypeFont,
     fill: tuple,
-    flag_size: int = 20,
+    flag_size: int = _s(20),
 ) -> None:
     """Draw an optional flag image followed by text."""
     x, y_pos = xy
@@ -273,7 +282,7 @@ def _draw_flagged_text(
     if flag_img is not None:
         flag_y = y_pos + max(0, (font.size - flag_size) // 2)
         img.paste(flag_img, (x, int(flag_y)), flag_img)
-        x += flag_size + 6
+        x += flag_size + _s(6)
     draw.text((x, y_pos), text, fill=fill, font=font)
 
 
@@ -416,7 +425,7 @@ def _create_card(
     country: str = "",
 ) -> tuple[Image.Image, ImageDraw.ImageDraw, int]:
     """Create the base card image with header. Returns (image, draw, y_cursor)."""
-    body_h = n_rows * (ROW_H + ROW_MARGIN_Y) + extra_body_h + FOOTER_H + 16
+    body_h = n_rows * (ROW_H + ROW_MARGIN_Y) + extra_body_h + FOOTER_H + _s(16)
     total_h = HEADER_H + body_h
     img = Image.new("RGBA", (CARD_W, total_h), BG_TOP)
     draw = ImageDraw.Draw(img)
@@ -431,27 +440,27 @@ def _create_card(
     title_font = _font("ExtraBold", 18)
     sub_font = _font("Medium", 11)
     _draw_flagged_text(
-        img, draw, (28, 18), country, header_title, title_font, WHITE, flag_size=22
+        img, draw, (_s(28), _s(18)), country, header_title, title_font, WHITE, flag_size=_s(22)
     )
-    draw.text((28, 46), header_sub, fill=(255, 255, 255, 220), font=sub_font)
+    draw.text((_s(28), _s(46)), header_sub, fill=(255, 255, 255, 220), font=sub_font)
 
     # F1 logo in header
-    logo = _load_f1_logo(128)
+    logo = _load_f1_logo(_s(128))
     if logo is not None:
-        logo_x = CARD_W - 28 - logo.width
+        logo_x = CARD_W - _s(28) - logo.width
         logo_y = (HEADER_H - logo.height) // 2
         img.paste(logo, (logo_x, logo_y), logo)
 
     # Circuit overlay in header (semi-transparent)
-    circuit_img = _load_circuit_image(circuit_id, 56)
+    circuit_img = _load_circuit_image(circuit_id, _s(56))
     if circuit_img is not None:
         alpha = circuit_img.split()[3].point(lambda p: int(p * 0.3))
         circuit_img.putalpha(alpha)
-        cx = CARD_W - 180 - circuit_img.width
+        cx = CARD_W - _s(180) - circuit_img.width
         cy = (HEADER_H - circuit_img.height) // 2
         img.paste(circuit_img, (cx, cy), circuit_img)
 
-    y = HEADER_H + 8
+    y = HEADER_H + _s(8)
     return img, draw, y
 
 
@@ -462,7 +471,7 @@ def _draw_footer(draw: ImageDraw.ImageDraw, img_h: int) -> None:
     bbox = draw.textbbox((0, 0), text, font=footer_font)
     tw = bbox[2] - bbox[0]
     draw.text(
-        ((CARD_W - tw) // 2, img_h - FOOTER_H + 8),
+        ((CARD_W - tw) // 2, img_h - FOOTER_H + _s(8)),
         text,
         fill=(255, 255, 255, 80),
         font=footer_font,
@@ -504,35 +513,35 @@ def _draw_driver_row(
     img.alpha_composite(overlay)
 
     # Team colour bar
-    draw.rectangle((x0, row_y0 + 6, x0 + TEAM_BAR_W, row_y1 - 6), fill=team_colour)
+    draw.rectangle((x0, row_y0 + _s(6), x0 + TEAM_BAR_W, row_y1 - _s(6)), fill=team_colour)
 
     # Position number
     pos_font = _font("ExtraBold", 20)
     pos_col = _pos_colour(pos)
     draw.text(
-        (x0 + 16, row_y0 + (ROW_H - 24) // 2), str(pos), fill=pos_col, font=pos_font
+        (x0 + _s(16), row_y0 + (ROW_H - _s(24)) // 2), str(pos), fill=pos_col, font=pos_font
     )
 
     # Driver acronym circle or headshot
-    circle_x = x0 + 56
-    circle_y = row_y0 + (ROW_H - 36) // 2
-    circle_r = 18
+    circle_x = x0 + _s(56)
+    circle_y = row_y0 + (ROW_H - _s(36)) // 2
+    circle_r = _s(18)
 
-    headshot = _load_headshot(headshot_url, 32)
+    headshot = _load_headshot(headshot_url, _s(32))
     if headshot is not None:
         # Team colour circle border
         draw.ellipse(
             (circle_x, circle_y, circle_x + circle_r * 2, circle_y + circle_r * 2),
             outline=team_colour,
-            width=2,
+            width=_s(2),
         )
         # Paste circular headshot inside border
-        img.paste(headshot, (circle_x + 2, circle_y + 2), headshot)
+        img.paste(headshot, (circle_x + _s(2), circle_y + _s(2)), headshot)
     else:
         draw.ellipse(
             (circle_x, circle_y, circle_x + circle_r * 2, circle_y + circle_r * 2),
             outline=team_colour,
-            width=2,
+            width=_s(2),
         )
         acr_font = _font("Bold", 11)
         acr_text = acronym[:3].upper() if acronym else driver_name[:3].upper()
@@ -540,44 +549,44 @@ def _draw_driver_row(
         acr_w = acr_bbox[2] - acr_bbox[0]
         acr_h = acr_bbox[3] - acr_bbox[1]
         draw.text(
-            (circle_x + circle_r - acr_w // 2, circle_y + circle_r - acr_h // 2 - 1),
+            (circle_x + circle_r - acr_w // 2, circle_y + circle_r - acr_h // 2 - _s(1)),
             acr_text,
             fill=WHITE,
             font=acr_font,
         )
 
     # Driver name + team
-    name_x = circle_x + circle_r * 2 + 12
+    name_x = circle_x + circle_r * 2 + _s(12)
     name_font = _font("Bold", 13)
     team_font = _font("Regular", 10)
-    draw.text((name_x, row_y0 + 8), driver_name, fill=WHITE, font=name_font)
+    draw.text((name_x, row_y0 + _s(8)), driver_name, fill=WHITE, font=name_font)
     draw.text(
-        (name_x, row_y0 + 26), team_name, fill=(255, 255, 255, 150), font=team_font
+        (name_x, row_y0 + _s(26)), team_name, fill=(255, 255, 255, 150), font=team_font
     )
 
     # Stats on the right side
     if stats:
-        stat_x = x1 - 16
+        stat_x = x1 - _s(16)
         label_font = _font("Regular", 8)
         value_font = _font("SemiBold", 12)
         for label, value in reversed(stats):
             vbbox = draw.textbbox((0, 0), value, font=value_font)
             lbbox = draw.textbbox((0, 0), label, font=label_font)
-            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + 8
+            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
             draw.text(
-                (stat_x - col_w, row_y0 + 8),
+                (stat_x - col_w, row_y0 + _s(8)),
                 label,
                 fill=(255, 255, 255, 130),
                 font=label_font,
             )
             val_col = RED_ACCENT if label == "PTS" and pos <= 3 else WHITE
             draw.text(
-                (stat_x - col_w, row_y0 + 22),
+                (stat_x - col_w, row_y0 + _s(22)),
                 value,
                 fill=val_col,
                 font=value_font,
             )
-            stat_x -= col_w + 16
+            stat_x -= col_w + _s(16)
 
     return row_y1 + ROW_MARGIN_Y
 
@@ -611,12 +620,12 @@ def _draw_constructor_row(
     ovr_draw.rounded_rectangle((x0, row_y0, x1, row_y1), radius=ROW_RADIUS, fill=bg)
     img.alpha_composite(overlay)
 
-    draw.rectangle((x0, row_y0 + 6, x0 + TEAM_BAR_W, row_y1 - 6), fill=team_colour)
+    draw.rectangle((x0, row_y0 + _s(6), x0 + TEAM_BAR_W, row_y1 - _s(6)), fill=team_colour)
 
     # Position
     pos_font = _font("ExtraBold", 20)
     draw.text(
-        (x0 + 16, row_y0 + (ROW_H - 24) // 2),
+        (x0 + _s(16), row_y0 + (ROW_H - _s(24)) // 2),
         str(pos),
         fill=_pos_colour(pos),
         font=pos_font,
@@ -625,7 +634,7 @@ def _draw_constructor_row(
     # Constructor name
     name_font = _font("Bold", 14)
     draw.text(
-        (x0 + 56, row_y0 + (ROW_H - 18) // 2),
+        (x0 + _s(56), row_y0 + (ROW_H - _s(18)) // 2),
         constructor_name,
         fill=WHITE,
         font=name_font,
@@ -633,7 +642,7 @@ def _draw_constructor_row(
 
     # Stats
     if stats:
-        stat_x = x1 - 16
+        stat_x = x1 - _s(16)
         label_font = _font("Regular", 8)
         value_font = _font("SemiBold", 12)
         pts_font = _font("ExtraBold", 18)
@@ -642,17 +651,17 @@ def _draw_constructor_row(
             vf = pts_font if is_pts else value_font
             vbbox = draw.textbbox((0, 0), value, font=vf)
             lbbox = draw.textbbox((0, 0), label, font=label_font)
-            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + 8
+            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
             draw.text(
-                (stat_x - col_w, row_y0 + 8),
+                (stat_x - col_w, row_y0 + _s(8)),
                 label,
                 fill=(255, 255, 255, 130),
                 font=label_font,
             )
             col = RED_ACCENT if is_pts else WHITE
-            vy = row_y0 + 18 if is_pts else row_y0 + 22
+            vy = row_y0 + _s(18) if is_pts else row_y0 + _s(22)
             draw.text((stat_x - col_w, vy), value, fill=col, font=vf)
-            stat_x -= col_w + 16
+            stat_x -= col_w + _s(16)
 
     return row_y1 + ROW_MARGIN_Y
 
@@ -687,7 +696,7 @@ def _draw_schedule_item(
     race_time = _utc_to_cst(race.date, race.time)
     sessions.append(("Race", f"{race_time} CST"))
 
-    item_h = 44 + len(sessions) * 14
+    item_h = _s(44) + len(sessions) * _s(14)
     row_y1 = y + item_h
 
     # Background
@@ -699,51 +708,51 @@ def _draw_schedule_item(
     img.alpha_composite(overlay)
 
     # Red accent bar
-    draw.rectangle((x0, y + 6, x0 + TEAM_BAR_W, row_y1 - 6), fill=RED_ACCENT)
+    draw.rectangle((x0, y + _s(6), x0 + TEAM_BAR_W, row_y1 - _s(6)), fill=RED_ACCENT)
 
     # Round label + sprint badge
     round_font = _font("Medium", 10)
     round_text = f"ROUND {race.round}"
-    draw.text((x0 + 16, y + 8), round_text, fill=(255, 255, 255, 130), font=round_font)
+    draw.text((x0 + _s(16), y + _s(8)), round_text, fill=(255, 255, 255, 130), font=round_font)
 
     if race.is_sprint_weekend:
         sprint_font = _font("Bold", 8)
         badge_text = "SPRINT"
         bb = draw.textbbox((0, 0), badge_text, font=sprint_font)
-        bw = bb[2] - bb[0] + 12
-        bh = bb[3] - bb[1] + 6
+        bw = bb[2] - bb[0] + _s(12)
+        bh = bb[3] - bb[1] + _s(6)
         rbbox = draw.textbbox((0, 0), round_text, font=round_font)
-        badge_x = x0 + 16 + rbbox[2] - rbbox[0] + 8
+        badge_x = x0 + _s(16) + rbbox[2] - rbbox[0] + _s(8)
         draw.rounded_rectangle(
-            (badge_x, y + 8, badge_x + bw, y + 8 + bh), radius=3, fill=RED_ACCENT
+            (badge_x, y + _s(8), badge_x + bw, y + _s(8) + bh), radius=_s(3), fill=RED_ACCENT
         )
-        draw.text((badge_x + 6, y + 10), badge_text, fill=WHITE, font=sprint_font)
+        draw.text((badge_x + _s(6), y + _s(10)), badge_text, fill=WHITE, font=sprint_font)
 
     # Race name with flag image
     title_font = _font("Bold", 14)
     _draw_flagged_text(
         img,
         draw,
-        (x0 + 16, y + 24),
+        (x0 + _s(16), y + _s(24)),
         race.circuit.location.country,
         race.race_name,
         title_font,
         WHITE,
-        flag_size=18,
+        flag_size=_s(18),
     )
 
     # Sessions list
     session_font = _font("Regular", 10)
     race_font = _font("SemiBold", 10)
-    sy = y + 44
+    sy = y + _s(44)
     for label, time_str in sessions:
         is_race = label == "Race"
         f = race_font if is_race else session_font
         col = RED_ACCENT if is_race else (255, 255, 255, 180)
-        draw.text((x0 + 28, sy), f"{label}: {time_str}", fill=col, font=f)
-        sy += 14
+        draw.text((x0 + _s(28), sy), f"{label}: {time_str}", fill=col, font=f)
+        sy += _s(14)
 
-    return row_y1 + ROW_MARGIN_Y + 4
+    return row_y1 + ROW_MARGIN_Y + _s(4)
 
 
 # ── Public render functions ────────────────────────────────────────────────────
@@ -895,14 +904,14 @@ def render_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
     upcoming = upcoming[:limit]
 
     if not upcoming:
-        img = Image.new("RGBA", (CARD_W, HEADER_H + 80), BG_TOP)
+        img = Image.new("RGBA", (CARD_W, HEADER_H + _s(80)), BG_TOP)
         draw = ImageDraw.Draw(img)
         draw.rectangle((0, 0, CARD_W, HEADER_H), fill=HEADER_RED)
         tf = _font("ExtraBold", 18)
-        draw.text((28, 28), "SCHEDULE", fill=WHITE, font=tf)
+        draw.text((_s(28), _s(28)), "SCHEDULE", fill=WHITE, font=tf)
         msg_font = _font("Regular", 14)
         draw.text(
-            (CARD_W // 2 - 100, HEADER_H + 24),
+            (CARD_W // 2 - _s(100), HEADER_H + _s(24)),
             "No upcoming races",
             fill=(255, 255, 255, 130),
             font=msg_font,
@@ -921,9 +930,9 @@ def render_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
             (race.qualifying, "Qualifying"),
         ]
         n_sessions = sum(1 for s, _ in session_slots if s is not None) + 1
-        total_items_h += 44 + n_sessions * 14 + ROW_MARGIN_Y + 4
+        total_items_h += _s(44) + n_sessions * _s(14) + ROW_MARGIN_Y + _s(4)
 
-    total_h = HEADER_H + 8 + total_items_h + FOOTER_H
+    total_h = HEADER_H + _s(8) + total_items_h + FOOTER_H
     season = upcoming[0].season if upcoming else ""
 
     img = Image.new("RGBA", (CARD_W, total_h), BG_TOP)
@@ -933,14 +942,14 @@ def render_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
 
     title_font = _font("ExtraBold", 18)
     sub_font = _font("Medium", 11)
-    draw.text((28, 18), f"F1 {season}", fill=WHITE, font=title_font)
-    draw.text((28, 46), "UPCOMING SCHEDULE", fill=(255, 255, 255, 220), font=sub_font)
+    draw.text((_s(28), _s(18)), f"F1 {season}", fill=WHITE, font=title_font)
+    draw.text((_s(28), _s(46)), "UPCOMING SCHEDULE", fill=(255, 255, 255, 220), font=sub_font)
 
-    logo = _load_f1_logo(128)
+    logo = _load_f1_logo(_s(128))
     if logo is not None:
-        img.paste(logo, (CARD_W - 28 - logo.width, (HEADER_H - logo.height) // 2), logo)
+        img.paste(logo, (CARD_W - _s(28) - logo.width, (HEADER_H - logo.height) // 2), logo)
 
-    y = HEADER_H + 8
+    y = HEADER_H + _s(8)
     for race in upcoming:
         y = _draw_schedule_item(img, draw, y, race)
 
@@ -970,7 +979,7 @@ def render_next_race(race: JolpicaRace) -> str:
     race_time = _utc_to_cst(race.date, race.time)
     sessions.append(("Race", f"{race_time} CST"))
 
-    body_h = 100 + len(sessions) * 20 + FOOTER_H
+    body_h = _s(100) + len(sessions) * _s(20) + FOOTER_H
     total_h = HEADER_H + body_h
 
     img = Image.new("RGBA", (CARD_W, total_h), BG_TOP)
@@ -981,67 +990,67 @@ def render_next_race(race: JolpicaRace) -> str:
     title_font = _font("ExtraBold", 18)
     sub_font = _font("Medium", 11)
     _draw_flagged_text(
-        img, draw, (28, 18), country, race.race_name, title_font, WHITE, flag_size=22
+        img, draw, (_s(28), _s(18)), country, race.race_name, title_font, WHITE, flag_size=_s(22)
     )
     draw.text(
-        (28, 46),
+        (_s(28), _s(46)),
         f"ROUND {race.round} · RACE WEEKEND",
         fill=(255, 255, 255, 220),
         font=sub_font,
     )
 
     # F1 logo + circuit overlay
-    logo = _load_f1_logo(128)
+    logo = _load_f1_logo(_s(128))
     if logo is not None:
-        img.paste(logo, (CARD_W - 28 - logo.width, (HEADER_H - logo.height) // 2), logo)
-    circuit_img = _load_circuit_image(race.circuit.circuit_id, 56)
+        img.paste(logo, (CARD_W - _s(28) - logo.width, (HEADER_H - logo.height) // 2), logo)
+    circuit_img = _load_circuit_image(race.circuit.circuit_id, _s(56))
     if circuit_img is not None:
         alpha = circuit_img.split()[3].point(lambda p: int(p * 0.3))
         circuit_img.putalpha(alpha)
-        cx = CARD_W - 180 - circuit_img.width
+        cx = CARD_W - _s(180) - circuit_img.width
         cy = (HEADER_H - circuit_img.height) // 2
         img.paste(circuit_img, (cx, cy), circuit_img)
 
-    y = HEADER_H + 16
+    y = HEADER_H + _s(16)
 
     # Round + sprint badge
     round_font = _font("Medium", 10)
     round_text = f"ROUND {race.round}"
-    draw.text((24, y), round_text, fill=(255, 255, 255, 130), font=round_font)
+    draw.text((_s(24), y), round_text, fill=(255, 255, 255, 130), font=round_font)
     if race.is_sprint_weekend:
         sprint_font = _font("Bold", 8)
         bb = draw.textbbox((0, 0), "SPRINT WEEKEND", font=sprint_font)
-        bw = bb[2] - bb[0] + 12
-        bh = bb[3] - bb[1] + 6
+        bw = bb[2] - bb[0] + _s(12)
+        bh = bb[3] - bb[1] + _s(6)
         rbbox = draw.textbbox((0, 0), round_text, font=round_font)
-        badge_x = 24 + rbbox[2] - rbbox[0] + 8
+        badge_x = _s(24) + rbbox[2] - rbbox[0] + _s(8)
         draw.rounded_rectangle(
-            (badge_x, y, badge_x + bw, y + bh), radius=3, fill=RED_ACCENT
+            (badge_x, y, badge_x + bw, y + bh), radius=_s(3), fill=RED_ACCENT
         )
-        draw.text((badge_x + 6, y + 2), "SPRINT WEEKEND", fill=WHITE, font=sprint_font)
-    y += 18
+        draw.text((badge_x + _s(6), y + _s(2)), "SPRINT WEEKEND", fill=WHITE, font=sprint_font)
+    y += _s(18)
 
     # Race name big
     big_font = _font("ExtraBold", 20)
     _draw_flagged_text(
-        img, draw, (24, y), country, race.race_name, big_font, WHITE, flag_size=24
+        img, draw, (_s(24), y), country, race.race_name, big_font, WHITE, flag_size=_s(24)
     )
-    y += 28
+    y += _s(28)
 
     # Circuit info
     info_font = _font("Regular", 11)
     draw.text(
-        (24, y),
+        (_s(24), y),
         f"{circuit_name} · {locality}, {country}",
         fill=(255, 255, 255, 160),
         font=info_font,
     )
-    y += 24
+    y += _s(24)
 
     # Section title
     section_font = _font("SemiBold", 11)
-    draw.text((24, y), "SCHEDULE (CST)", fill=RED_ACCENT, font=section_font)
-    y += 20
+    draw.text((_s(24), y), "SCHEDULE (CST)", fill=RED_ACCENT, font=section_font)
+    y += _s(20)
 
     # Sessions
     session_font = _font("Regular", 11)
@@ -1050,8 +1059,8 @@ def render_next_race(race: JolpicaRace) -> str:
         is_race = label == "Race"
         f = race_session_font if is_race else session_font
         col = RED_ACCENT if is_race else (255, 255, 255, 180)
-        draw.text((36, y), f"{label}: {time_str}", fill=col, font=f)
-        y += 20
+        draw.text((_s(36), y), f"{label}: {time_str}", fill=col, font=f)
+        y += _s(20)
 
     _draw_footer(draw, img.height)
     return _save_image(img)

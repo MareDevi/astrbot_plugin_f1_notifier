@@ -178,7 +178,7 @@ class TestSchedulerLoggerImport(unittest.TestCase):
     """Verify the scheduler uses astrbot.api.logger, not logging.getLogger."""
 
     def test_no_logging_getLogger(self):
-        source = _SCHEDULER_SRC.read_text()
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
         self.assertNotIn("logging.getLogger", source)
         self.assertNotIn("import logging", source)
         self.assertIn("from astrbot.api import logger", source)
@@ -192,16 +192,12 @@ class TestCloseSessionLock(unittest.TestCase):
     """Verify close_session uses _SESSION_LOCK."""
 
     def test_close_session_uses_lock(self):
-        source = _API_SRC.read_text()
+        source = _API_SRC.read_text(encoding='utf-8')
         import re
         match = re.search(r'async def close_session.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group()
-        self.assertIn("_SESSION_LOCK", func_body)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertIn("_ensure_lock", func_body)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +209,7 @@ class TestNoBuiltinShadowing(unittest.TestCase):
 
     def test_no_round_parameter(self):
         """Ensure no 'def ...(... round ...' exists (should be round_num)."""
-        source = _MAIN_SRC.read_text()
+        source = _MAIN_SRC.read_text(encoding='utf-8')
         import re
         # Match function defs that have `round` as a parameter name (word boundary)
         matches = re.findall(r'async def f1_\w+\([^)]*\bround\b[^)]*\)', source)
@@ -221,19 +217,19 @@ class TestNoBuiltinShadowing(unittest.TestCase):
 
     def test_no_type_parameter(self):
         """Ensure no 'def ...(... type ...' exists (should be category)."""
-        source = _MAIN_SRC.read_text()
+        source = _MAIN_SRC.read_text(encoding='utf-8')
         import re
         matches = re.findall(r'async def f1_\w+\([^)]*\btype\b[^)]*\)', source)
         self.assertEqual(matches, [], f"Found `type` as parameter: {matches}")
 
     def test_round_num_exists(self):
         """Ensure round_num is used as the parameter name."""
-        source = _MAIN_SRC.read_text()
+        source = _MAIN_SRC.read_text(encoding='utf-8')
         self.assertIn("round_num", source)
 
     def test_category_exists(self):
         """Ensure category is used as the parameter name for standings."""
-        source = _MAIN_SRC.read_text()
+        source = _MAIN_SRC.read_text(encoding='utf-8')
         self.assertIn("category", source)
 
 
@@ -246,21 +242,26 @@ class TestApiLazyLock(unittest.TestCase):
 
     def test_no_global_lock_instantiation(self):
         """Ensure asyncio.Lock() is not assigned at module level."""
-        source = _API_SRC.read_text()
+        source = _API_SRC.read_text(encoding='utf-8')
         import re
         # Should have `_SESSION_LOCK: asyncio.Lock | None = None` instead of `_SESSION_LOCK = asyncio.Lock()`
-        self.assertNotRegex(source, r'^_SESSION_LOCK\s*=\s*asyncio\.Lock\(\)', msg="Global Lock() found")
+        # Only match non-indented (module-level) assignment
+        self.assertIsNone(
+            re.search(r'^_SESSION_LOCK\s*=\s*asyncio\.Lock\(\)', source, re.MULTILINE),
+            msg="Global Lock() found at module level",
+        )
         self.assertIn("_SESSION_LOCK: asyncio.Lock | None = None", source)
 
-    def test_lock_created_in_get_session(self):
-        """Ensure lock is lazily created inside _get_session."""
-        source = _API_SRC.read_text()
+    def test_lock_created_in_ensure_lock(self):
+        """Ensure lock is lazily created inside _ensure_lock."""
+        source = _API_SRC.read_text(encoding='utf-8')
         import re
-        match = re.search(r'async def _get_session.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)
+        match = re.search(r'def _ensure_lock.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group()
         self.assertIn("_SESSION_LOCK is None", func_body)
         self.assertIn("_SESSION_LOCK = asyncio.Lock()", func_body)
+        self.assertIn("get_running_loop", func_body)
 
 
 # ---------------------------------------------------------------------------
@@ -272,15 +273,16 @@ class TestApiNarrowExceptions(unittest.TestCase):
 
     def test_no_broad_except_exception(self):
         """Ensure no 'except Exception as exc' in api.py."""
-        source = _API_SRC.read_text()
+        source = _API_SRC.read_text(encoding='utf-8')
         self.assertNotIn("except Exception as exc:", source)
 
     def test_uses_specific_exceptions(self):
         """Ensure specific exception types are caught."""
-        source = _API_SRC.read_text()
+        source = _API_SRC.read_text(encoding='utf-8')
         self.assertIn("aiohttp.ClientError", source)
         self.assertIn("KeyError", source)
         self.assertIn("ValueError", source)
+        self.assertIn("TimeoutError", source)
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +294,7 @@ class TestModelsPEP604(unittest.TestCase):
 
     def test_no_optional_import(self):
         """Ensure Optional is not imported from typing."""
-        source = _MODELS_SRC.read_text()
+        source = _MODELS_SRC.read_text(encoding='utf-8')
         import re
         # Should not have Optional in the typing import line
         typing_import = re.search(r'^from typing import (.+)$', source, re.MULTILINE)
@@ -303,7 +305,7 @@ class TestModelsPEP604(unittest.TestCase):
 
     def test_no_optional_usage(self):
         """Ensure Optional[...] syntax is not used in field definitions."""
-        source = _MODELS_SRC.read_text()
+        source = _MODELS_SRC.read_text(encoding='utf-8')
         import re
         # Skip TYPE_CHECKING blocks and look for Optional[ in regular code
         matches = re.findall(r'Optional\[', source)
@@ -311,7 +313,7 @@ class TestModelsPEP604(unittest.TestCase):
 
     def test_pipe_none_used(self):
         """Ensure X | None syntax is used."""
-        source = _MODELS_SRC.read_text()
+        source = _MODELS_SRC.read_text(encoding='utf-8')
         self.assertIn("| None", source)
 
 
@@ -323,24 +325,25 @@ class TestSchedulerNoRedundantList(unittest.TestCase):
     """Verify scheduler.py doesn't use redundant list() in _broadcast."""
 
     def test_no_list_wrapper_in_broadcast(self):
-        """Ensure _broadcast doesn't wrap subscribers in list()."""
-        source = _SCHEDULER_SRC.read_text()
+        """Ensure _broadcast uses a snapshot copy instead of redundant list()."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
         import re
         match = re.search(r'async def _broadcast.*?(?=\n    [a-z@]|\nclass |\Z)', source, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group()
         self.assertNotIn("list(self._subscribers)", func_body)
-        self.assertIn("for s in self._subscribers", func_body)
+        self.assertIn("self._subscribers.copy()", func_body)
 
     def test_dynamic_sleep_in_run(self):
         """Ensure _run uses dynamic sleep to prevent timer drift."""
-        source = _SCHEDULER_SRC.read_text()
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
         import re
         match = re.search(r'async def _run.*?(?=\n    async def |\nclass |\Z)', source, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group()
         self.assertIn("loop.time()", func_body)
         self.assertIn("POLL_INTERVAL - elapsed", func_body)
+        self.assertIn("get_running_loop", func_body)
 
 
 # ---------------------------------------------------------------------------
@@ -352,12 +355,16 @@ class TestFormatterPEP604(unittest.TestCase):
 
     def test_no_optional_import(self):
         """Ensure Optional is not imported from typing."""
-        source = _FORMATTER_SRC.read_text()
+        source = _FORMATTER_SRC.read_text(encoding='utf-8')
         self.assertNotIn("from typing import Optional", source)
 
     def test_no_optional_usage(self):
         """Ensure Optional[...] syntax is not used."""
-        source = _FORMATTER_SRC.read_text()
+        source = _FORMATTER_SRC.read_text(encoding='utf-8')
         import re
         matches = re.findall(r'Optional\[', source)
         self.assertEqual(matches, [], "Found Optional[] usage in formatter.py")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -134,7 +134,7 @@ class F1Scheduler:
             except Exception as e:
                 logger.error(f"[F1Notifier] Broadcast error to {session_str}: {e}")
 
-        await asyncio.gather(*[_send(s) for s in self._subscribers])
+        await asyncio.gather(*[_send(s) for s in self._subscribers.copy()])
 
     @staticmethod
     def _parse_utc(date_str: str, time_str: str) -> datetime:
@@ -177,7 +177,7 @@ class F1Scheduler:
 
     async def _run(self) -> None:
         await self._load()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             start = loop.time()
             try:

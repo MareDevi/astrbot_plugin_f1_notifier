@@ -428,15 +428,24 @@ class TestSchedulerFixes(unittest.TestCase):
         self.assertIn("def _default_state()", source)
         self.assertIn("_default_state()", source)
 
-    def test_practice_session_country_validation(self):
-        """Verify _check_practice_sessions validates country_name before pushing."""
+    def test_practice_session_date_validation(self):
+        """Verify _check_practice_sessions validates date_start before pushing."""
         source = _SCHEDULER_SRC.read_text(encoding='utf-8')
         import re
         match = re.search(r'async def _check_practice_sessions.*?(?=\n    async def |\nclass |\Z)', source, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group()
-        self.assertIn("country_name", func_body)
-        self.assertIn("expected_country", func_body)
+        self.assertIn("_session_matches_slot", func_body)
+
+    def test_session_matches_slot_exists(self):
+        """Verify _session_matches_slot helper is defined with date-based check."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'def _session_matches_slot.*?(?=\n    @|\n    #|\n    async def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("date_start", func_body)
+        self.assertIn("timedelta", func_body)
 
 
 if __name__ == "__main__":

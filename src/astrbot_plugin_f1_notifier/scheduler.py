@@ -25,7 +25,7 @@ from astrbot.api import logger
 
 from . import api
 from . import formatter as fmt
-from .models import Success, Failure, JolpicaRace, JolpicaSessionSchedule
+from .models import Success, Failure, JolpicaRace, JolpicaSessionSchedule, OpenF1Session
 
 if TYPE_CHECKING:
     from astrbot.core.star.context import Context
@@ -175,6 +175,23 @@ class F1Scheduler:
                     continue
         return min(times) if times else None
 
+    @staticmethod
+    def _session_matches_slot(
+        session: OpenF1Session, expected_time: datetime
+    ) -> bool:
+        """Check that the OpenF1 session started within 24 h of *expected_time*.
+
+        This guards against the API returning a stale session from a
+        previous race weekend when data for the current weekend is delayed.
+        """
+        try:
+            session_start = datetime.fromisoformat(
+                session.date_start.replace("Z", "+00:00")
+            )
+        except (ValueError, AttributeError):
+            return False
+        return abs(session_start - expected_time) < timedelta(hours=24)
+
     # ──────────────── main loop ────────────────
 
     async def _run(self) -> None:
@@ -249,12 +266,17 @@ class F1Scheduler:
                     match session_res:
                         case Success(value=of1_session):
                             # Validate session belongs to current race weekend
-                            expected_country = next_race.circuit.location.country
-                            if of1_session.country_name != expected_country:
+                            # by checking date_start is within 24 h of the
+                            # expected practice time (robust against country
+                            # name mismatches across APIs).
+                            if not self._session_matches_slot(
+                                of1_session, fp_time
+                            ):
                                 logger.debug(
-                                    f"[F1Notifier] FP{fp_num} session country "
-                                    f"'{of1_session.country_name}' does not match "
-                                    f"expected '{expected_country}', skipping"
+                                    f"[F1Notifier] FP{fp_num} session "
+                                    f"date_start='{of1_session.date_start}' "
+                                    f"is not within 24 h of expected slot, "
+                                    f"skipping"
                                 )
                                 continue
                             sk = of1_session.session_key

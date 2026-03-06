@@ -52,7 +52,7 @@ def _utc_to_cst(date_str: str, time_str: str) -> str:
             f"{date_str}T{time_str.rstrip('Z')}", "%Y-%m-%dT%H:%M:%S"
         ).replace(tzinfo=timezone.utc)
         return dt_utc.astimezone(CST).strftime("%m-%d %H:%M")
-    except Exception:
+    except ValueError:
         return f"{date_str} {time_str}"
 
 
@@ -77,7 +77,7 @@ def race_utc(race: JolpicaRace) -> datetime | None:
         return datetime.strptime(
             f"{race.date}T{race.time.rstrip('Z')}", "%Y-%m-%dT%H:%M:%S"
         ).replace(tzinfo=timezone.utc)
-    except Exception:
+    except ValueError:
         return None
 
 

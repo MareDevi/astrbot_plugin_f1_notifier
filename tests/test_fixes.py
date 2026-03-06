@@ -366,5 +366,87 @@ class TestFormatterPEP604(unittest.TestCase):
         self.assertEqual(matches, [], "Found Optional[] usage in formatter.py")
 
 
+# ---------------------------------------------------------------------------
+# 12. Formatter narrowed exception handling (ValueError instead of Exception)
+# ---------------------------------------------------------------------------
+
+class TestFormatterNarrowExceptions(unittest.TestCase):
+    """Verify formatter.py uses ValueError instead of broad Exception."""
+
+    def test_no_broad_except_exception_in_utc_to_cst(self):
+        source = _FORMATTER_SRC.read_text(encoding='utf-8')
+        import re
+        # Find _utc_to_cst function body and check it uses except ValueError
+        match = re.search(r'def _utc_to_cst.*?(?=\ndef |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertNotIn("except Exception", func_body)
+        self.assertIn("except ValueError", func_body)
+
+    def test_no_broad_except_exception_in_race_utc(self):
+        source = _FORMATTER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'def race_utc.*?(?=\ndef |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertNotIn("except Exception", func_body)
+        self.assertIn("except ValueError", func_body)
+
+
+# ---------------------------------------------------------------------------
+# 13. Scheduler narrowed exception handling + factory state + session validation
+# ---------------------------------------------------------------------------
+
+class TestSchedulerFixes(unittest.TestCase):
+    """Verify scheduler.py fixes for shallow copy, exception handling, and session validation."""
+
+    def test_no_broad_except_in_next_race(self):
+        """Verify _next_race uses except ValueError."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'def _next_race.*?(?=\n    @|\n    async def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertNotIn("except Exception", func_body)
+        self.assertIn("except ValueError", func_body)
+
+    def test_no_broad_except_in_first_session_time(self):
+        """Verify _first_session_time uses except ValueError."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'def _first_session_time.*?(?=\n    #|\n    async def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertNotIn("except Exception", func_body)
+        self.assertIn("except ValueError", func_body)
+
+    def test_no_shallow_copy_default_state(self):
+        """Verify _DEFAULT_STATE global dict is replaced by a factory function."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        self.assertNotIn("_DEFAULT_STATE = {", source)
+        self.assertNotIn("dict(_DEFAULT_STATE)", source)
+        self.assertIn("def _default_state()", source)
+        self.assertIn("_default_state()", source)
+
+    def test_practice_session_date_validation(self):
+        """Verify _check_practice_sessions validates date_start before pushing."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def _check_practice_sessions.*?(?=\n    async def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("_session_matches_slot", func_body)
+
+    def test_session_matches_slot_exists(self):
+        """Verify _session_matches_slot helper is defined with date-based check."""
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'def _session_matches_slot.*?(?=\n    @|\n    #|\n    async def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("date_start", func_body)
+        self.assertIn("timedelta", func_body)
+
+
 if __name__ == "__main__":
     unittest.main()

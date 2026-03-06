@@ -25,7 +25,7 @@ from astrbot.api import logger
 
 from . import api
 from . import formatter as fmt
-from .models import Success, Failure, JolpicaRace, JolpicaSessionSchedule
+from .models import Success, Failure, JolpicaRace, JolpicaSessionSchedule, OpenF1Session
 
 if TYPE_CHECKING:
     from astrbot.core.star.context import Context
@@ -35,7 +35,9 @@ POLL_INTERVAL = 60          # seconds
 WEEKEND_START_THRESHOLD = timedelta(hours=24)  # notify 24 h before first session
 PRE_RACE_THRESHOLD = timedelta(minutes=30)     # notify 30 min before race
 
-_DEFAULT_STATE = {"last_notified_round": 0, "notified_events": []}
+def _default_state() -> dict:
+    """Factory function to create a fresh default state dict."""
+    return {"last_notified_round": 0, "notified_events": []}
 
 
 class F1Scheduler:
@@ -45,7 +47,7 @@ class F1Scheduler:
         self.ctx = context
         self._star = star
         self._subscribers: list[str] = []
-        self._state: dict = dict(_DEFAULT_STATE)
+        self._state: dict = _default_state()
         self._task: asyncio.Task | None = None
         self._loaded = False
 
@@ -90,7 +92,7 @@ class F1Scheduler:
     async def _load(self) -> None:
         """Load subscribers and state from AstrBot KV store."""
         self._subscribers = await self._star.get_kv_data("f1_subscribers", []) or []
-        self._state = await self._star.get_kv_data("f1_state", dict(_DEFAULT_STATE)) or dict(_DEFAULT_STATE)
+        self._state = await self._star.get_kv_data("f1_state", _default_state()) or _default_state()
         self._loaded = True
         logger.info(
             f"[F1Notifier] Loaded {len(self._subscribers)} subscriber(s) from KV store."
@@ -149,7 +151,7 @@ class F1Scheduler:
             try:
                 if F1Scheduler._parse_utc(race.date, race.time) >= now:
                     return race
-            except Exception:
+            except ValueError:
                 continue
         return None
 
@@ -169,9 +171,26 @@ class F1Scheduler:
             if slot is not None:
                 try:
                     times.append(F1Scheduler._parse_utc(slot.date, slot.time))
-                except Exception:
+                except ValueError:
                     continue
         return min(times) if times else None
+
+    @staticmethod
+    def _session_matches_slot(
+        session: OpenF1Session, expected_time: datetime
+    ) -> bool:
+        """Check that the OpenF1 session started within 24 h of *expected_time*.
+
+        This guards against the API returning a stale session from a
+        previous race weekend when data for the current weekend is delayed.
+        """
+        try:
+            session_start = datetime.fromisoformat(
+                session.date_start.replace("Z", "+00:00")
+            )
+        except (ValueError, AttributeError):
+            return False
+        return abs(session_start - expected_time) < timedelta(hours=24)
 
     # ──────────────── main loop ────────────────
 
@@ -246,6 +265,20 @@ class F1Scheduler:
                     session_res = await api.get_practice_session(fp_num)
                     match session_res:
                         case Success(value=of1_session):
+                            # Validate session belongs to current race weekend
+                            # by checking date_start is within 24 h of the
+                            # expected practice time (robust against country
+                            # name mismatches across APIs).
+                            if not self._session_matches_slot(
+                                of1_session, fp_time
+                            ):
+                                logger.debug(
+                                    f"[F1Notifier] FP{fp_num} session "
+                                    f"date_start='{of1_session.date_start}' "
+                                    f"is not within 24 h of expected slot, "
+                                    f"skipping"
+                                )
+                                continue
                             sk = of1_session.session_key
                             results_res = await api.get_session_result(sk)
                             drivers_res = await api.get_drivers_for_session(sk)

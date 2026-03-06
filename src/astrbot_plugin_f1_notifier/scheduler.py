@@ -196,99 +196,129 @@ class F1Scheduler:
                 logger.warning(f"[F1Notifier] Schedule fetch failed: {err}")
                 return
             case Success(value=races):
-                pass
+                if not races:
+                    return
+                now = datetime.now(timezone.utc)
+                next_race = self._next_race(races)
+                if next_race is not None:
+                    round_num = next_race.round_int
+                    race_time = self._parse_utc(next_race.date, next_race.time)
+                    await self._check_weekend_start(next_race, round_num, now)
+                    await self._check_practice_sessions(next_race, round_num, now)
+                    await self._check_qualifying(next_race, round_num, now)
+                    await self._check_pre_race(next_race, round_num, now, race_time)
+                await self._check_race_results(races, now)
 
-        if not races:
+    async def _check_weekend_start(
+        self, next_race: JolpicaRace, round_num: int, now: datetime
+    ) -> None:
+        """Notify subscribers when the first session of the weekend is < 24 h away."""
+        first_session = self._first_session_time(next_race)
+        if first_session is None:
+            return
+        delta = first_session - now
+        if timedelta(0) <= delta <= WEEKEND_START_THRESHOLD:
+            if not self._notified(round_num, "weekend_start"):
+                msg = fmt.format_weekend_start(next_race)
+                await self._broadcast(msg)
+                await self._mark_notified(round_num, "weekend_start")
+                logger.info(f"[F1Notifier] Sent weekend_start for round {round_num}")
+
+    async def _check_practice_sessions(
+        self, next_race: JolpicaRace, round_num: int, now: datetime
+    ) -> None:
+        """Push practice session results once each session has been over for 90 min."""
+        fp_sessions = [
+            (next_race.first_practice,  "1", "fp1_result"),
+            (next_race.second_practice, "2", "fp2_result"),
+            (next_race.third_practice,  "3", "fp3_result"),
+        ]
+        for fp_slot, fp_num, event_key in fp_sessions:
+            if fp_slot is None:
+                continue
+            fp_time = self._parse_utc(fp_slot.date, fp_slot.time)
+            if now > fp_time + timedelta(minutes=90):
+                if not self._notified(round_num, event_key):
+                    session_res = await api.get_practice_session(fp_num)
+                    match session_res:
+                        case Success(value=of1_session):
+                            sk = of1_session.session_key
+                            results_res = await api.get_session_result(sk)
+                            drivers_res = await api.get_drivers_for_session(sk)
+                            match (results_res, drivers_res):
+                                case (Success(value=results), Success(value=drivers_list)) if results:
+                                    drivers_by_num = {d.driver_number: d for d in drivers_list}
+                                    msg = fmt.format_practice_result(
+                                        of1_session, results, drivers_by_num, fp_num
+                                    )
+                                    await self._broadcast(msg)
+                                    await self._mark_notified(round_num, event_key)
+                                    logger.info(f"[F1Notifier] Sent {event_key} for round {round_num}")
+                                case (Failure(error=err), _):
+                                    logger.warning(f"[F1Notifier] Failed to fetch FP{fp_num} results: {err}")
+                                case (_, Failure(error=err)):
+                                    logger.warning(f"[F1Notifier] Failed to fetch FP{fp_num} drivers: {err}")
+                                case _:
+                                    logger.debug(f"[F1Notifier] FP{fp_num} results not ready yet")
+                        case Failure(error=err):
+                            logger.warning(f"[F1Notifier] FP{fp_num} session not found: {err}")
+
+    async def _check_qualifying(
+        self, next_race: JolpicaRace, round_num: int, now: datetime
+    ) -> None:
+        """Push qualifying results once qualifying has been over for 2 hours."""
+        if next_race.qualifying is None:
+            return
+        qual_time = self._parse_utc(next_race.qualifying.date, next_race.qualifying.time)
+        if now > qual_time + timedelta(hours=2):
+            if not self._notified(round_num, "qualifying_result"):
+                qual_res = await api.get_qualifying_result(round_num)
+                match qual_res:
+                    case Success(value=race) if race.qualifying_results:
+                        msg = fmt.format_qualifying_result(race)
+                        await self._broadcast(msg)
+                        await self._mark_notified(round_num, "qualifying_result")
+                        logger.info(f"[F1Notifier] Sent qualifying_result for round {round_num}")
+                    case Failure(error=err):
+                        logger.warning(f"[F1Notifier] Qualifying result not ready: {err}")
+
+    async def _check_pre_race(
+        self,
+        next_race: JolpicaRace,
+        round_num: int,
+        now: datetime,
+        race_time: datetime,
+    ) -> None:
+        """Push the starting grid when the race is within 30 minutes of starting."""
+        delta_race = race_time - now
+        if not (timedelta(0) <= delta_race <= PRE_RACE_THRESHOLD):
+            return
+        if self._notified(round_num, "pre_race"):
             return
 
-        now = datetime.now(timezone.utc)
-        next_race = self._next_race(races)
+        session_res = await api.get_latest_session("Race")
+        match session_res:
+            case Success(value=session):
+                sk = session.session_key
+                drivers_res = await api.get_drivers_for_session(sk)
+                grid_res = await api.get_starting_grid(sk)
+                match (drivers_res, grid_res):
+                    case (Success(value=drivers_list), Success(value=grid)) if grid:
+                        drivers_by_num = {d.driver_number: d for d in drivers_list}
+                        msg = fmt.format_starting_grid(drivers_by_num, grid)
+                    case _:
+                        msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
+            case Failure():
+                msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
 
-        if next_race is not None:
-            round_num = next_race.round_int
-            race_time = self._parse_utc(next_race.date, next_race.time)
+        await self._broadcast(msg)
+        await self._mark_notified(round_num, "pre_race")
+        logger.info(f"[F1Notifier] Sent pre_race for round {round_num}")
 
-            # ── 1. Weekend start notification ──────────────────────────────
-            first_session = self._first_session_time(next_race)
-            if first_session is not None:
-                delta = first_session - now
-                if timedelta(0) <= delta <= WEEKEND_START_THRESHOLD:
-                    if not self._notified(round_num, "weekend_start"):
-                        msg = fmt.format_weekend_start(next_race)
-                        await self._broadcast(msg)
-                        await self._mark_notified(round_num, "weekend_start")
-                        logger.info(f"[F1Notifier] Sent weekend_start for round {round_num}")
-
-            # ── 2. Practice session result push ───────────────────────────
-            fp_sessions = [
-                (next_race.first_practice,  "1", "fp1_result"),
-                (next_race.second_practice, "2", "fp2_result"),
-                (next_race.third_practice,  "3", "fp3_result"),
-            ]
-            for fp_slot, fp_num, event_key in fp_sessions:
-                if fp_slot is None:
-                    continue
-                fp_time = self._parse_utc(fp_slot.date, fp_slot.time)
-                if now > fp_time + timedelta(minutes=90):
-                    if not self._notified(round_num, event_key):
-                        session_res = await api.get_practice_session(fp_num)
-                        match session_res:
-                            case Success(value=of1_session):
-                                sk = of1_session.session_key
-                                results_res = await api.get_session_result(sk)
-                                drivers_res = await api.get_drivers_for_session(sk)
-                                match (results_res, drivers_res):
-                                    case (Success(value=results), Success(value=drivers_list)) if results:
-                                        drivers_by_num = {d.driver_number: d for d in drivers_list}
-                                        msg = fmt.format_practice_result(
-                                            of1_session, results, drivers_by_num, fp_num
-                                        )
-                                        await self._broadcast(msg)
-                                        await self._mark_notified(round_num, event_key)
-                                        logger.info(f"[F1Notifier] Sent {event_key} for round {round_num}")
-                                    case _:
-                                        logger.debug(f"[F1Notifier] FP{fp_num} results not ready yet")
-                            case Failure(error=err):
-                                logger.warning(f"[F1Notifier] FP{fp_num} session not found: {err}")
-
-            # ── 3. Qualifying result push ──────────────────────────────────
-            if next_race.qualifying is not None:
-                qual_time = self._parse_utc(next_race.qualifying.date, next_race.qualifying.time)
-                if now > qual_time + timedelta(hours=2):
-                    if not self._notified(round_num, "qualifying_result"):
-                        qual_res = await api.get_qualifying_result(round_num)
-                        match qual_res:
-                            case Success(value=race) if race.qualifying_results:
-                                msg = fmt.format_qualifying_result(race)
-                                await self._broadcast(msg)
-                                await self._mark_notified(round_num, "qualifying_result")
-                                logger.info(f"[F1Notifier] Sent qualifying_result for round {round_num}")
-                            case Failure(error=err):
-                                logger.warning(f"[F1Notifier] Qualifying result not ready: {err}")
-
-            # ── 4. Pre-race starting grid push ────────────────────────────
-            delta_race = race_time - now
-            if timedelta(0) <= delta_race <= PRE_RACE_THRESHOLD:
-                if not self._notified(round_num, "pre_race"):
-                    session_res = await api.get_latest_session("Race")
-                    match session_res:
-                        case Success(value=session):
-                            sk = session.session_key
-                            drivers_res = await api.get_drivers_for_session(sk)
-                            grid_res = await api.get_starting_grid(sk)
-                            match (drivers_res, grid_res):
-                                case (Success(value=drivers_list), Success(value=grid)) if grid:
-                                    drivers_by_num = {d.driver_number: d for d in drivers_list}
-                                    msg = fmt.format_starting_grid(drivers_by_num, grid)
-                                case _:
-                                    msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
-                        case Failure():
-                            msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
-                    await self._broadcast(msg)
-                    await self._mark_notified(round_num, "pre_race")
-                    logger.info(f"[F1Notifier] Sent pre_race for round {round_num}")
-
-        # ── 5. Race result push (most recently finished race) ──────────────
+    async def _check_race_results(
+        self, races: list[JolpicaRace], now: datetime
+    ) -> None:
+        """Push race and sprint results for the most recently finished race."""
         finished = [
             r for r in races
             if (
@@ -296,33 +326,35 @@ class F1Scheduler:
                 and dt + timedelta(hours=3) < now
             )
         ]
-        if finished:
-            latest_finished = finished[-1]
-            lf_round = latest_finished.round_int
-            if not self._notified(lf_round, "race_result"):
-                race_res = await api.get_race_result(lf_round)
-                match race_res:
-                    case Success(value=race) if race.race_results:
-                        msg = fmt.format_race_result(race)
-                        await self._broadcast(msg)
-                        await self._mark_notified(lf_round, "race_result")
-                        logger.info(f"[F1Notifier] Sent race_result for round {lf_round}")
-                    case Failure(error=err):
-                        logger.warning(f"[F1Notifier] Race result not ready: {err}")
+        if not finished:
+            return
 
-            # ── 6. Sprint result push ──────────────────────────────────────
-            if latest_finished.sprint is not None:
-                sprint_time = self._parse_utc(
-                    latest_finished.sprint.date, latest_finished.sprint.time
-                )
-                if now > sprint_time + timedelta(hours=2):
-                    if not self._notified(lf_round, "sprint_result"):
-                        sprint_res = await api.get_sprint_result(lf_round)
-                        match sprint_res:
-                            case Success(value=race) if race.sprint_results:
-                                msg = fmt.format_sprint_result(race)
-                                await self._broadcast(msg)
-                                await self._mark_notified(lf_round, "sprint_result")
-                                logger.info(f"[F1Notifier] Sent sprint_result for round {lf_round}")
-                            case Failure(error=err):
-                                logger.warning(f"[F1Notifier] Sprint result not ready: {err}")
+        latest_finished = finished[-1]
+        lf_round = latest_finished.round_int
+
+        if not self._notified(lf_round, "race_result"):
+            race_res = await api.get_race_result(lf_round)
+            match race_res:
+                case Success(value=race) if race.race_results:
+                    msg = fmt.format_race_result(race)
+                    await self._broadcast(msg)
+                    await self._mark_notified(lf_round, "race_result")
+                    logger.info(f"[F1Notifier] Sent race_result for round {lf_round}")
+                case Failure(error=err):
+                    logger.warning(f"[F1Notifier] Race result not ready: {err}")
+
+        if latest_finished.sprint is not None:
+            sprint_time = self._parse_utc(
+                latest_finished.sprint.date, latest_finished.sprint.time
+            )
+            if now > sprint_time + timedelta(hours=2):
+                if not self._notified(lf_round, "sprint_result"):
+                    sprint_res = await api.get_sprint_result(lf_round)
+                    match sprint_res:
+                        case Success(value=race) if race.sprint_results:
+                            msg = fmt.format_sprint_result(race)
+                            await self._broadcast(msg)
+                            await self._mark_notified(lf_round, "sprint_result")
+                            logger.info(f"[F1Notifier] Sent sprint_result for round {lf_round}")
+                        case Failure(error=err):
+                            logger.warning(f"[F1Notifier] Sprint result not ready: {err}")

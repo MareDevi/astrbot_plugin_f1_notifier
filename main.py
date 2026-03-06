@@ -178,25 +178,25 @@ class F1NotifierPlugin(Star):
                 yield event.plain_result(f"⏳ 暂未找到 FP{normalized} 练习赛数据，请练习赛结束后再试。")
                 return
             case Success(value=of1_session):
-                pass
-
-        sk = of1_session.session_key
-        results_result, drivers_result = await _gather(
-            api.get_session_result(sk),
-            api.get_drivers_for_session(sk),
-        )
-
-        match (results_result, drivers_result):
-            case (Success(value=results), Success(value=drivers_list)) if results:
-                drivers_by_num = {d.driver_number: d for d in drivers_list}
-                yield event.plain_result(
-                    fmt.format_practice_result(of1_session, results, drivers_by_num, normalized)
+                sk = of1_session.session_key
+                results_result, drivers_result = await _gather(
+                    api.get_session_result(sk),
+                    api.get_drivers_for_session(sk),
                 )
-            case (Success(), _):
-                yield event.plain_result(f"⏳ FP{normalized} 结果数据暂未就绪，请练习赛结束后再试。")
-            case (Failure(error=err), _):
-                logger.error(f"[F1Notifier] /f1 practice error: {err}")
-                yield event.plain_result("❌ 获取练习赛数据失败，请稍后重试。")
+                match (results_result, drivers_result):
+                    case (Success(value=results), Success(value=drivers_list)) if results:
+                        drivers_by_num = {d.driver_number: d for d in drivers_list}
+                        yield event.plain_result(
+                            fmt.format_practice_result(of1_session, results, drivers_by_num, normalized)
+                        )
+                    case (Success(), Failure(error=err)):
+                        logger.error(f"[F1Notifier] /f1 practice drivers error: {err}")
+                        yield event.plain_result("❌ 获取练习赛车手数据失败，请稍后重试。")
+                    case (Success(), _):
+                        yield event.plain_result(f"⏳ FP{normalized} 结果数据暂未就绪，请练习赛结束后再试。")
+                    case (Failure(error=err), _):
+                        logger.error(f"[F1Notifier] /f1 practice error: {err}")
+                        yield event.plain_result("❌ 获取练习赛数据失败，请稍后重试。")
 
     @f1.command("standings")
     async def f1_standings(self, event: AstrMessageEvent, type: str = "drivers"):

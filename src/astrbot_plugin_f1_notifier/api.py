@@ -51,12 +51,14 @@ if TYPE_CHECKING:
 JOLPICA_BASE = "https://api.jolpi.ca/ergast/f1"
 OPENF1_BASE = "https://api.openf1.org/v1"
 
-_SESSION_LOCK = asyncio.Lock()
+_SESSION_LOCK: asyncio.Lock | None = None
 _CLIENT_SESSION: aiohttp.ClientSession | None = None
 
 
 async def _get_session() -> aiohttp.ClientSession:
-    global _CLIENT_SESSION
+    global _CLIENT_SESSION, _SESSION_LOCK
+    if _SESSION_LOCK is None:
+        _SESSION_LOCK = asyncio.Lock()
     async with _SESSION_LOCK:
         if _CLIENT_SESSION is None or _CLIENT_SESSION.closed:
             _CLIENT_SESSION = aiohttp.ClientSession(
@@ -67,7 +69,9 @@ async def _get_session() -> aiohttp.ClientSession:
 
 
 async def close_session() -> None:
-    global _CLIENT_SESSION
+    global _CLIENT_SESSION, _SESSION_LOCK
+    if _SESSION_LOCK is None:
+        _SESSION_LOCK = asyncio.Lock()
     async with _SESSION_LOCK:
         if _CLIENT_SESSION and not _CLIENT_SESSION.closed:
             await _CLIENT_SESSION.close()
@@ -121,7 +125,7 @@ async def get_current_schedule(season: int | str = "current") -> ScheduleResult:
         if not races_raw:
             return Failure(error="empty schedule")
         return Success(value=[JolpicaRace.model_validate(r) for r in races_raw])
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -137,7 +141,7 @@ async def get_race_result(
                 return Success(value=JolpicaRace.model_validate(first))
             case _:
                 return Failure(error="no race data")
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -153,7 +157,7 @@ async def get_qualifying_result(
                 return Success(value=JolpicaRace.model_validate(first))
             case _:
                 return Failure(error="no qualifying data")
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -169,7 +173,7 @@ async def get_sprint_result(
                 return Success(value=JolpicaRace.model_validate(first))
             case _:
                 return Failure(error="no sprint data")
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -187,7 +191,7 @@ async def get_driver_standings(season: int | str = "current") -> StandingsResult
                 return Success(value=standings)
             case _:
                 return Failure(error="no standings data")
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -207,7 +211,7 @@ async def get_constructor_standings(
                 return Success(value=standings)
             case _:
                 return Failure(error="no constructor standings data")
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -243,7 +247,7 @@ async def get_latest_session(session_name: str = "Race") -> SessionResult:
                     or datetime.min.replace(tzinfo=timezone.utc)
                 )
                 return Success(value=OpenF1Session.model_validate(past_list[-1]))
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -289,7 +293,7 @@ async def get_practice_session(
                     or datetime.min.replace(tzinfo=timezone.utc)
                 )
                 return Success(value=OpenF1Session.model_validate(past_list[-1]))
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -299,7 +303,7 @@ async def get_drivers_for_session(session_key: int | str) -> DriversResult:
         raw = await _openf1_get("/drivers", params={"session_key": session_key})
         drivers = [OpenF1Driver.model_validate(d) for d in raw]
         return Success(value=drivers)
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -325,7 +329,7 @@ async def get_starting_grid(session_key: int | str) -> GridResult:
             key=lambda x: x.position,
         )
         return Success(value=grid)
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -338,7 +342,7 @@ async def get_meeting_for_session(session_key: int | str) -> MeetingResult:
                 return Success(value=OpenF1Meeting.model_validate(first))
             case _:
                 return Failure(error="no meeting found")
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))
 
 
@@ -357,5 +361,5 @@ async def get_session_result(session_key: int | str) -> SessionResultsResult:
             key=lambda x: x.position,
         )
         return Success(value=results)
-    except Exception as exc:
+    except (aiohttp.ClientError, KeyError, ValueError, TypeError) as exc:
         return Failure(error=str(exc))

@@ -134,7 +134,7 @@ class F1Scheduler:
             except Exception as e:
                 logger.error(f"[F1Notifier] Broadcast error to {session_str}: {e}")
 
-        await asyncio.gather(*[_send(s) for s in list(self._subscribers)])
+        await asyncio.gather(*[_send(s) for s in self._subscribers])
 
     @staticmethod
     def _parse_utc(date_str: str, time_str: str) -> datetime:
@@ -177,14 +177,18 @@ class F1Scheduler:
 
     async def _run(self) -> None:
         await self._load()
+        loop = asyncio.get_event_loop()
         while True:
+            start = loop.time()
             try:
                 await self._check_and_notify()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"[F1Notifier] Scheduler error: {e}", exc_info=True)
-            await asyncio.sleep(POLL_INTERVAL)
+            elapsed = loop.time() - start
+            sleep_time = max(0, POLL_INTERVAL - elapsed)
+            await asyncio.sleep(sleep_time)
 
     async def _check_and_notify(self) -> None:
         if not self._subscribers:

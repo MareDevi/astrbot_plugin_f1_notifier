@@ -17,6 +17,9 @@ from pathlib import Path
 _SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
 _SCHEDULER_SRC = _SRC_ROOT / "astrbot_plugin_f1_notifier" / "scheduler.py"
 _API_SRC = _SRC_ROOT / "astrbot_plugin_f1_notifier" / "api.py"
+_MODELS_SRC = _SRC_ROOT / "astrbot_plugin_f1_notifier" / "models.py"
+_FORMATTER_SRC = _SRC_ROOT / "astrbot_plugin_f1_notifier" / "formatter.py"
+_MAIN_SRC = Path(__file__).resolve().parent.parent / "main.py"
 
 
 # ---------------------------------------------------------------------------
@@ -199,3 +202,162 @@ class TestCloseSessionLock(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# 6. No built-in shadowing in main.py
+# ---------------------------------------------------------------------------
+
+class TestNoBuiltinShadowing(unittest.TestCase):
+    """Verify that main.py does not use built-in names as parameters."""
+
+    def test_no_round_parameter(self):
+        """Ensure no 'def ...(... round ...' exists (should be round_num)."""
+        source = _MAIN_SRC.read_text()
+        import re
+        # Match function defs that have `round` as a parameter name (word boundary)
+        matches = re.findall(r'async def f1_\w+\([^)]*\bround\b[^)]*\)', source)
+        self.assertEqual(matches, [], f"Found `round` as parameter: {matches}")
+
+    def test_no_type_parameter(self):
+        """Ensure no 'def ...(... type ...' exists (should be category)."""
+        source = _MAIN_SRC.read_text()
+        import re
+        matches = re.findall(r'async def f1_\w+\([^)]*\btype\b[^)]*\)', source)
+        self.assertEqual(matches, [], f"Found `type` as parameter: {matches}")
+
+    def test_round_num_exists(self):
+        """Ensure round_num is used as the parameter name."""
+        source = _MAIN_SRC.read_text()
+        self.assertIn("round_num", source)
+
+    def test_category_exists(self):
+        """Ensure category is used as the parameter name for standings."""
+        source = _MAIN_SRC.read_text()
+        self.assertIn("category", source)
+
+
+# ---------------------------------------------------------------------------
+# 7. API lazy lock initialization
+# ---------------------------------------------------------------------------
+
+class TestApiLazyLock(unittest.TestCase):
+    """Verify that api.py uses lazy lock initialization."""
+
+    def test_no_global_lock_instantiation(self):
+        """Ensure asyncio.Lock() is not assigned at module level."""
+        source = _API_SRC.read_text()
+        import re
+        # Should have `_SESSION_LOCK: asyncio.Lock | None = None` instead of `_SESSION_LOCK = asyncio.Lock()`
+        self.assertNotRegex(source, r'^_SESSION_LOCK\s*=\s*asyncio\.Lock\(\)', msg="Global Lock() found")
+        self.assertIn("_SESSION_LOCK: asyncio.Lock | None = None", source)
+
+    def test_lock_created_in_get_session(self):
+        """Ensure lock is lazily created inside _get_session."""
+        source = _API_SRC.read_text()
+        import re
+        match = re.search(r'async def _get_session.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("_SESSION_LOCK is None", func_body)
+        self.assertIn("_SESSION_LOCK = asyncio.Lock()", func_body)
+
+
+# ---------------------------------------------------------------------------
+# 8. API narrowed exception handling
+# ---------------------------------------------------------------------------
+
+class TestApiNarrowExceptions(unittest.TestCase):
+    """Verify that api.py uses specific exceptions instead of broad Exception."""
+
+    def test_no_broad_except_exception(self):
+        """Ensure no 'except Exception as exc' in api.py."""
+        source = _API_SRC.read_text()
+        self.assertNotIn("except Exception as exc:", source)
+
+    def test_uses_specific_exceptions(self):
+        """Ensure specific exception types are caught."""
+        source = _API_SRC.read_text()
+        self.assertIn("aiohttp.ClientError", source)
+        self.assertIn("KeyError", source)
+        self.assertIn("ValueError", source)
+
+
+# ---------------------------------------------------------------------------
+# 9. Models PEP 604 unified type hints
+# ---------------------------------------------------------------------------
+
+class TestModelsPEP604(unittest.TestCase):
+    """Verify models.py uses PEP 604 type hints consistently."""
+
+    def test_no_optional_import(self):
+        """Ensure Optional is not imported from typing."""
+        source = _MODELS_SRC.read_text()
+        import re
+        # Should not have Optional in the typing import line
+        typing_import = re.search(r'^from typing import (.+)$', source, re.MULTILINE)
+        self.assertIsNotNone(typing_import)
+        imported = typing_import.group(1)
+        self.assertNotIn("Optional", imported)
+        self.assertNotIn("Union", imported)
+
+    def test_no_optional_usage(self):
+        """Ensure Optional[...] syntax is not used in field definitions."""
+        source = _MODELS_SRC.read_text()
+        import re
+        # Skip TYPE_CHECKING blocks and look for Optional[ in regular code
+        matches = re.findall(r'Optional\[', source)
+        self.assertEqual(matches, [], "Found Optional[] usage in models.py")
+
+    def test_pipe_none_used(self):
+        """Ensure X | None syntax is used."""
+        source = _MODELS_SRC.read_text()
+        self.assertIn("| None", source)
+
+
+# ---------------------------------------------------------------------------
+# 10. Scheduler no redundant list copy
+# ---------------------------------------------------------------------------
+
+class TestSchedulerNoRedundantList(unittest.TestCase):
+    """Verify scheduler.py doesn't use redundant list() in _broadcast."""
+
+    def test_no_list_wrapper_in_broadcast(self):
+        """Ensure _broadcast doesn't wrap subscribers in list()."""
+        source = _SCHEDULER_SRC.read_text()
+        import re
+        match = re.search(r'async def _broadcast.*?(?=\n    [a-z@]|\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertNotIn("list(self._subscribers)", func_body)
+        self.assertIn("for s in self._subscribers", func_body)
+
+    def test_dynamic_sleep_in_run(self):
+        """Ensure _run uses dynamic sleep to prevent timer drift."""
+        source = _SCHEDULER_SRC.read_text()
+        import re
+        match = re.search(r'async def _run.*?(?=\n    async def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("loop.time()", func_body)
+        self.assertIn("POLL_INTERVAL - elapsed", func_body)
+
+
+# ---------------------------------------------------------------------------
+# 11. Formatter PEP 604 type hints
+# ---------------------------------------------------------------------------
+
+class TestFormatterPEP604(unittest.TestCase):
+    """Verify formatter.py uses PEP 604 type hints consistently."""
+
+    def test_no_optional_import(self):
+        """Ensure Optional is not imported from typing."""
+        source = _FORMATTER_SRC.read_text()
+        self.assertNotIn("from typing import Optional", source)
+
+    def test_no_optional_usage(self):
+        """Ensure Optional[...] syntax is not used."""
+        source = _FORMATTER_SRC.read_text()
+        import re
+        matches = re.findall(r'Optional\[', source)
+        self.assertEqual(matches, [], "Found Optional[] usage in formatter.py")

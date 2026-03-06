@@ -707,6 +707,16 @@ def _draw_schedule_item(
     )
     img.alpha_composite(overlay)
 
+    # Circuit SVG on the right side
+    circ_size = min(item_h - _s(16), _s(90))
+    circuit_img = _load_circuit_image(race.circuit.circuit_id, circ_size)
+    if circuit_img is not None:
+        alpha = circuit_img.split()[3].point(lambda p: int(p * 0.45))
+        circuit_img.putalpha(alpha)
+        cx = x1 - _s(8) - circuit_img.width
+        cy = y + (item_h - circuit_img.height) // 2
+        img.paste(circuit_img, (cx, cy), circuit_img)
+
     # Red accent bar
     draw.rectangle((x0, y + _s(6), x0 + TEAM_BAR_W, row_y1 - _s(6)), fill=RED_ACCENT)
 

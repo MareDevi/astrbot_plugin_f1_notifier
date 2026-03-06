@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------------------------------------------------------------------------
@@ -110,10 +113,9 @@ class TestFormatterRobustness(unittest.TestCase):
         """Import _formatter standalone (no framework dependency)."""
         import importlib
         import sys
-        # The module is plain Python, should import fine
         spec = importlib.util.spec_from_file_location(
             "_formatter",
-            "/home/runner/work/astrbot_plugin_f1_notifier/astrbot_plugin_f1_notifier/_formatter.py",
+            str(_REPO_ROOT / "_formatter.py"),
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -199,8 +201,7 @@ class TestSchedulerLoggerImport(unittest.TestCase):
     """Verify the scheduler uses astrbot.api.logger, not logging.getLogger."""
 
     def test_no_logging_getLogger(self):
-        with open("/home/runner/work/astrbot_plugin_f1_notifier/astrbot_plugin_f1_notifier/_scheduler.py") as f:
-            source = f.read()
+        source = (_REPO_ROOT / "_scheduler.py").read_text()
         self.assertNotIn("logging.getLogger", source)
         self.assertNotIn("import logging", source)
         self.assertIn("from astrbot.api import logger", source)
@@ -214,8 +215,7 @@ class TestCloseSessionLock(unittest.TestCase):
     """Verify close_session uses _SESSION_LOCK."""
 
     def test_close_session_uses_lock(self):
-        with open("/home/runner/work/astrbot_plugin_f1_notifier/astrbot_plugin_f1_notifier/_f1_api.py") as f:
-            source = f.read()
+        source = (_REPO_ROOT / "_f1_api.py").read_text()
         # Find the close_session function and verify it uses async with _SESSION_LOCK
         import re
         match = re.search(r'async def close_session.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)

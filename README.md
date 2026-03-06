@@ -78,4 +78,4 @@ git clone https://github.com/MareDevi/astrbot_plugin_f1_notifier
 
 ## 许可证
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE)

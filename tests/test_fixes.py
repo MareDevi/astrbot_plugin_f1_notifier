@@ -615,5 +615,66 @@ class TestBroadcastSemaphore(unittest.TestCase):
         self.assertIn("self._subscribers.copy()", func_body)
 
 
+# ---------------------------------------------------------------------------
+# 20. asyncio.TimeoutError in API exception handlers (Python 3.10 compat)
+# ---------------------------------------------------------------------------
+
+class TestAsyncioTimeoutError(unittest.TestCase):
+    """Verify api.py catches asyncio.TimeoutError, not built-in TimeoutError.
+
+    On Python 3.10, asyncio.TimeoutError and the built-in TimeoutError are
+    independent classes. aiohttp raises asyncio.TimeoutError on network
+    timeouts, so the except clauses must use the asyncio-specific variant.
+    """
+
+    def test_no_bare_timeout_error_in_except(self):
+        """Ensure except clauses use asyncio.TimeoutError, not bare TimeoutError."""
+        import re
+        source = _API_SRC.read_text(encoding='utf-8')
+        # Find all except clauses that mention TimeoutError
+        except_lines = re.findall(r'^\s*except\s*\(.*TimeoutError.*\).*:',
+                                  source, re.MULTILINE)
+        self.assertTrue(except_lines, "No except clauses with TimeoutError found")
+        for line in except_lines:
+            self.assertIn("asyncio.TimeoutError", line,
+                          f"Except clause uses bare TimeoutError: {line.strip()}")
+
+
+# ---------------------------------------------------------------------------
+# 21. Scheduler _run CancelledError covers sleep
+# ---------------------------------------------------------------------------
+
+class TestRunCancelledErrorCoversLoop(unittest.TestCase):
+    """Verify _run's try/except asyncio.CancelledError wraps asyncio.sleep.
+
+    When stop() cancels the background task, the CancelledError is most
+    likely raised during asyncio.sleep. The try block must cover the sleep
+    call so that _run handles cancellation internally.
+    """
+
+    def test_sleep_inside_cancelled_error_try_block(self):
+        """Ensure asyncio.sleep is inside the try block that catches CancelledError."""
+        import re
+        source = _SCHEDULER_SRC.read_text(encoding='utf-8')
+        match = re.search(
+            r'async def _run.*?(?=\n    async def |\nclass |\Z)', source, re.DOTALL
+        )
+        self.assertIsNotNone(match, "_run method not found")
+        func_body = match.group()
+
+        # Find the try block that catches CancelledError
+        # asyncio.sleep must appear between 'try:' and 'except asyncio.CancelledError'
+        try_cancelled = re.search(
+            r'try:(.+?)except asyncio\.CancelledError',
+            func_body,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(try_cancelled,
+                             "try...except asyncio.CancelledError block not found")
+        try_body = try_cancelled.group(1)
+        self.assertIn("asyncio.sleep", try_body,
+                       "asyncio.sleep must be inside the CancelledError try block")
+
+
 if __name__ == "__main__":
     unittest.main()

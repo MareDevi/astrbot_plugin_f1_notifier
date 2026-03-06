@@ -261,7 +261,7 @@ class TestApiLazyLock(unittest.TestCase):
         func_body = match.group()
         self.assertIn("_SESSION_LOCK is None", func_body)
         self.assertIn("_SESSION_LOCK = asyncio.Lock()", func_body)
-        self.assertIn("get_running_loop", func_body)
+        self.assertIn("asyncio.get_running_loop()", func_body)
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +343,7 @@ class TestSchedulerNoRedundantList(unittest.TestCase):
         func_body = match.group()
         self.assertIn("loop.time()", func_body)
         self.assertIn("POLL_INTERVAL - elapsed", func_body)
-        self.assertIn("get_running_loop", func_body)
+        self.assertIn("asyncio.get_running_loop()", func_body)
 
 
 # ---------------------------------------------------------------------------

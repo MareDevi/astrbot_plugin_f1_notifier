@@ -26,7 +26,7 @@ from astrbot.api import logger
 from . import api
 from . import formatter as fmt
 from . import image_renderer as img
-from .models import Failure, JolpicaRace, JolpicaSessionSchedule, OpenF1Session, Success
+from .models import F1RaceWeekend, F1SessionSlot, Failure, OpenF1Session, Success
 
 if TYPE_CHECKING:
     from astrbot.api import AstrBotConfig
@@ -183,7 +183,7 @@ class F1Scheduler:
         ).replace(tzinfo=timezone.utc)
 
     @staticmethod
-    def _next_race(races: list[JolpicaRace]) -> JolpicaRace | None:
+    def _next_race(races: list[F1RaceWeekend]) -> F1RaceWeekend | None:
         now = datetime.now(timezone.utc)
         for race in races:
             try:
@@ -194,9 +194,9 @@ class F1Scheduler:
         return None
 
     @staticmethod
-    def _first_session_time(race: JolpicaRace) -> datetime | None:
+    def _first_session_time(race: F1RaceWeekend) -> datetime | None:
         """Find the earliest session start time in the weekend."""
-        slots: list[JolpicaSessionSchedule | None] = [
+        slots: list[F1SessionSlot | None] = [
             race.first_practice,
             race.sprint_qualifying,
             race.second_practice,
@@ -275,7 +275,7 @@ class F1Scheduler:
                 await self._check_race_results(races, now)
 
     async def _check_weekend_start(
-        self, next_race: JolpicaRace, round_num: int, now: datetime
+        self, next_race: F1RaceWeekend, round_num: int, now: datetime
     ) -> None:
         """Notify subscribers when the first session of the weekend is < 24 h away."""
         first_session = self._first_session_time(next_race)
@@ -285,13 +285,13 @@ class F1Scheduler:
         if timedelta(0) <= delta <= WEEKEND_START_THRESHOLD:
             if not self._notified(round_num, "weekend_start"):
                 msg = fmt.format_weekend_start(next_race)
-                image_path = img.render_weekend_start(next_race)
+                image_path = await img.render_weekend_start(next_race)
                 await self._broadcast(msg, image_path)
                 await self._mark_notified(round_num, "weekend_start")
                 logger.info(f"[F1Notifier] Sent weekend_start for round {round_num}")
 
     async def _check_practice_sessions(
-        self, next_race: JolpicaRace, round_num: int, now: datetime
+        self, next_race: F1RaceWeekend, round_num: int, now: datetime
     ) -> None:
         """Push practice session results once each session has been over for 90 min."""
         fp_sessions = [
@@ -336,12 +336,12 @@ class F1Scheduler:
                                     msg = fmt.format_practice_result(
                                         of1_session, results, drivers_by_num, fp_num
                                     )
-                                    image_path = img.render_practice_result(
+                                    image_path = await img.render_practice_result(
                                         of1_session,
                                         results,
                                         drivers_by_num,
                                         fp_num,
-                                        circuit_id=next_race.circuit.circuit_id,
+                                        circuit_id=next_race.circuit_id,
                                     )
                                     await self._broadcast(msg, image_path)
                                     await self._mark_notified(round_num, event_key)
@@ -366,7 +366,7 @@ class F1Scheduler:
                             )
 
     async def _check_qualifying(
-        self, next_race: JolpicaRace, round_num: int, now: datetime
+        self, next_race: F1RaceWeekend, round_num: int, now: datetime
     ) -> None:
         """Push qualifying results once qualifying has been over for 2 hours."""
         if next_race.qualifying is None:
@@ -380,7 +380,7 @@ class F1Scheduler:
                 match qual_res:
                     case Success(value=race) if race.qualifying_results:
                         msg = fmt.format_qualifying_result(race)
-                        image_path = img.render_qualifying_result(race)
+                        image_path = await img.render_qualifying_result(race)
                         await self._broadcast(msg, image_path)
                         await self._mark_notified(round_num, "qualifying_result")
                         logger.info(
@@ -393,7 +393,7 @@ class F1Scheduler:
 
     async def _check_pre_race(
         self,
-        next_race: JolpicaRace,
+        next_race: F1RaceWeekend,
         round_num: int,
         now: datetime,
         race_time: datetime,
@@ -418,24 +418,24 @@ class F1Scheduler:
                     case (Success(value=drivers_list), Success(value=grid)) if grid:
                         drivers_by_num = {d.driver_number: d for d in drivers_list}
                         msg = fmt.format_starting_grid(drivers_by_num, grid)
-                        image_path = img.render_starting_grid(
+                        image_path = await img.render_starting_grid(
                             drivers_by_num,
                             grid,
-                            circuit_id=next_race.circuit.circuit_id,
+                            circuit_id=next_race.circuit_id,
                         )
                     case _:
                         msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
-                        image_path = img.render_next_race(next_race)
+                        image_path = await img.render_next_race(next_race)
             case Failure():
                 msg = fmt.format_next_race(next_race) + "\n\n🏁 正赛即将开始！"
-                image_path = img.render_next_race(next_race)
+                image_path = await img.render_next_race(next_race)
 
         await self._broadcast(msg, image_path)
         await self._mark_notified(round_num, "pre_race")
         logger.info(f"[F1Notifier] Sent pre_race for round {round_num}")
 
     async def _check_race_results(
-        self, races: list[JolpicaRace], now: datetime
+        self, races: list[F1RaceWeekend], now: datetime
     ) -> None:
         """Push race and sprint results for the most recently finished race."""
         finished = [
@@ -454,7 +454,7 @@ class F1Scheduler:
             match race_res:
                 case Success(value=race) if race.race_results:
                     msg = fmt.format_race_result(race)
-                    image_path = img.render_race_result(race)
+                    image_path = await img.render_race_result(race)
                     await self._broadcast(msg, image_path)
                     await self._mark_notified(lf_round, "race_result")
                     logger.info(f"[F1Notifier] Sent race_result for round {lf_round}")
@@ -471,7 +471,7 @@ class F1Scheduler:
                     match sprint_res:
                         case Success(value=race) if race.sprint_results:
                             msg = fmt.format_sprint_result(race)
-                            image_path = img.render_sprint_result(race)
+                            image_path = await img.render_sprint_result(race)
                             await self._broadcast(msg, image_path)
                             await self._mark_notified(lf_round, "sprint_result")
                             logger.info(

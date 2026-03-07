@@ -10,10 +10,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from .models import (
+    F1RaceWeekend,
+    F1SessionSlot,
     JolpicaConstructorStanding,
     JolpicaDriverStanding,
-    JolpicaRace,
-    JolpicaSessionSchedule,
     OpenF1Driver,
     OpenF1Position,
     OpenF1Session,
@@ -65,15 +65,12 @@ def _medal(pos: int) -> str:
 def _utc_to_cst(date_str: str, time_str: str) -> str:
     """Convert 'YYYY-MM-DD' + 'HH:MM:SSZ' to 'MM-DD HH:MM CST'."""
     try:
-        dt_utc = datetime.strptime(
-            f"{date_str}T{time_str.rstrip('Z')}", "%Y-%m-%dT%H:%M:%S"
-        ).replace(tzinfo=timezone.utc)
-        return dt_utc.astimezone(CST).strftime("%m-%d %H:%M")
-    except ValueError:
+        return datetime.fromisoformat(f"{date_str}T{time_str}").astimezone(CST).strftime("%m-%d %H:%M")
+    except (ValueError, TypeError, AttributeError):
         return f"{date_str} {time_str}"
 
 
-def _session_cst(s: JolpicaSessionSchedule | None) -> str | None:
+def _session_cst(s: F1SessionSlot | None) -> str | None:
     """Return formatted CST time for an optional weekend session slot."""
     if s is None:
         return None
@@ -89,22 +86,20 @@ def _format_lap_duration(seconds: float) -> str:
     return f"{m}:{s:06.3f}"
 
 
-def race_utc(race: JolpicaRace) -> datetime | None:
+def race_utc(race: F1RaceWeekend) -> datetime | None:
     try:
-        return datetime.strptime(
-            f"{race.date}T{race.time.rstrip('Z')}", "%Y-%m-%dT%H:%M:%S"
-        ).replace(tzinfo=timezone.utc)
-    except ValueError:
+        return datetime.fromisoformat(f"{race.date}T{race.time}")
+    except (ValueError, TypeError, AttributeError):
         return None
 
 
 # ─────────────────────── public formatters ───────────────────────
 
 
-def format_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
+def format_schedule(races: list[F1RaceWeekend], limit: int = 5) -> str:
     """Format upcoming race schedule with all session times."""
     now = datetime.now(timezone.utc)
-    upcoming: list[JolpicaRace] = []
+    upcoming: list[F1RaceWeekend] = []
     for race in races:
         dt = race_utc(race)
         if dt is not None and dt >= now:
@@ -116,11 +111,11 @@ def format_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
 
     lines = [f"📅 F1 {upcoming[0].season} 赛季 · 近期赛程\n"]
     for race in upcoming:
-        flag = _flag(race.circuit.location.country)
+        flag = _flag(race.country)
         sprint_tag = " 🏃 冲刺赛周末" if race.is_sprint_weekend else ""
         lines.append(f"第{race.round}站{sprint_tag}\n{flag} {race.race_name}")
 
-        session_slots: list[tuple[JolpicaSessionSchedule | None, str]] = [
+        session_slots: list[tuple[F1SessionSlot | None, str]] = [
             (race.first_practice, "FP1 练习赛"),
             (race.sprint_qualifying, "冲刺排位"),
             (race.second_practice, "FP2 练习赛"),
@@ -138,14 +133,14 @@ def format_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
     return "\n".join(lines)
 
 
-def format_next_race(race: JolpicaRace) -> str:
+def format_next_race(race: F1RaceWeekend) -> str:
     """Format full weekend timetable for the next race."""
-    country = race.circuit.location.country
+    country = race.country
     flag = _flag(country)
-    circuit = race.circuit.circuit_name
-    locality = race.circuit.location.locality
+    circuit = race.circuit_name
+    locality = race.locality
 
-    session_slots: list[tuple[JolpicaSessionSchedule | None, str]] = [
+    session_slots: list[tuple[F1SessionSlot | None, str]] = [
         (race.first_practice, "FP1"),
         (race.sprint_qualifying, "冲刺排位"),
         (race.second_practice, "FP2"),
@@ -170,51 +165,51 @@ def format_next_race(race: JolpicaRace) -> str:
     return "\n".join(lines)
 
 
-def format_race_result(race: JolpicaRace) -> str:
+def format_race_result(race: F1RaceWeekend) -> str:
     """Format full race result."""
-    flag = _flag(race.circuit.location.country)
+    flag = _flag(race.country)
     lines = [
         f"🏁 正赛结果 — {flag} {race.race_name} (第{race.round}站)",
         "",
     ]
     for res in race.race_results:
-        pos = res.pos_int
-        time_val = res.time.time if res.time else res.status
+        pos = res.position
+        time_val = res.time if res.time else res.status
         lines.append(
-            f"{_medal(pos)} {res.driver.full_name} ({res.constructor.name})\n"
+            f"{_medal(pos)} {res.driver_name} ({res.team_name})\n"
             f"       ⏱ {time_val}  圈数: {res.laps}  积分: {res.points}"
         )
     return "\n".join(lines)
 
 
-def format_qualifying_result(race: JolpicaRace) -> str:
+def format_qualifying_result(race: F1RaceWeekend) -> str:
     """Format qualifying result."""
-    flag = _flag(race.circuit.location.country)
+    flag = _flag(race.country)
     lines = [
         f"⏱ 排位赛结果 — {flag} {race.race_name} (第{race.round}站)",
         "",
     ]
     for res in race.qualifying_results:
-        pos = res.pos_int
+        pos = res.position
         lines.append(
-            f"{_medal(pos)} {res.driver.full_name} ({res.constructor.name})\n"
+            f"{_medal(pos)} {res.driver_name} ({res.team_name})\n"
             f"       Q1:{res.q1}  Q2:{res.q2}  Q3:{res.q3}"
         )
     return "\n".join(lines)
 
 
-def format_sprint_result(race: JolpicaRace) -> str:
+def format_sprint_result(race: F1RaceWeekend) -> str:
     """Format sprint race result."""
-    flag = _flag(race.circuit.location.country)
+    flag = _flag(race.country)
     lines = [
         f"🏃 冲刺赛结果 — {flag} {race.race_name} (第{race.round}站)",
         "",
     ]
     for res in race.sprint_results:
-        pos = res.pos_int
-        time_val = res.time.time if res.time else res.status
+        pos = res.position
+        time_val = res.time if res.time else res.status
         lines.append(
-            f"{_medal(pos)} {res.driver.full_name} ({res.constructor.name})\n"
+            f"{_medal(pos)} {res.driver_name} ({res.team_name})\n"
             f"       ⏱ {time_val}  积分: {res.points}"
         )
     return "\n".join(lines)
@@ -264,7 +259,7 @@ def format_starting_grid(
     return "\n".join(lines)
 
 
-def format_weekend_start(race: JolpicaRace) -> str:
+def format_weekend_start(race: F1RaceWeekend) -> str:
     """Notification sent when a race weekend is about to begin."""
     return "🏎 F1 赛车周末即将开始！\n\n" + format_next_race(race) + "\n\n加油！🏁"
 

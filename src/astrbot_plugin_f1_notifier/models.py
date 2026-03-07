@@ -6,6 +6,10 @@ Design mirrors the Rust pattern:
   - Option<T>   →  T | None with None as default
 
 All models use ``extra="ignore"`` so unknown API fields are silently dropped.
+
+Data sources:
+  - OpenF1 (https://api.openf1.org/v1/): schedule, results, practice, grid
+  - Jolpica-F1 (https://api.jolpi.ca/ergast/f1/): standings only
 """
 
 from __future__ import annotations
@@ -43,7 +47,113 @@ ApiResult = Success[T] | Failure
 _CFG = ConfigDict(extra="ignore", populate_by_name=True)
 
 
-# ── Jolpica-F1 models ──────────────────────────────────────────────────────────
+# ── F1 core models (populated from OpenF1) ─────────────────────────────────────
+
+
+class F1SessionSlot(BaseModel):
+    """A weekend sub-session time slot (FP1, Qualifying, Sprint, etc.)."""
+
+    model_config = _CFG
+
+    date: str = ""   # "YYYY-MM-DD"
+    time: str = ""   # "HH:MM:SSZ"
+
+
+class F1RaceResult(BaseModel):
+    """Single driver result from a race session."""
+
+    model_config = _CFG
+
+    position: int = 99
+    driver_name: str = ""
+    driver_first_name: str = ""
+    driver_last_name: str = ""
+    team_name: str = ""
+    time: str | None = None     # "1:23:45.678", "+1.234", "+1 LAP" etc.
+    laps: str = ""
+    points: str = "0"
+    status: str = ""            # "Finished" / "DNF" / "DNS" / "DSQ"
+
+
+class F1QualifyingResult(BaseModel):
+    """Single driver result from a qualifying session."""
+
+    model_config = _CFG
+
+    position: int = 99
+    driver_name: str = ""
+    driver_first_name: str = ""
+    driver_last_name: str = ""
+    team_name: str = ""
+    q1: str = "—"
+    q2: str = "—"
+    q3: str = "—"
+
+    @field_validator("q1", "q2", "q3", mode="before")
+    @classmethod
+    def _default_dash(cls, v: object) -> str:
+        return str(v) if v else "—"
+
+
+class F1SprintResult(BaseModel):
+    """Single driver result from a sprint session."""
+
+    model_config = _CFG
+
+    position: int = 99
+    driver_name: str = ""
+    driver_first_name: str = ""
+    driver_last_name: str = ""
+    team_name: str = ""
+    time: str | None = None
+    laps: str = ""
+    points: str = "0"
+    status: str = ""
+
+
+class F1RaceWeekend(BaseModel):
+    """Full race-weekend entry built from OpenF1 meetings + sessions data."""
+
+    model_config = _CFG
+
+    season: str = ""
+    round: str = "0"
+    race_name: str = ""
+    circuit_id: str = ""          # mapped from circuit_short_name for image lookup
+    circuit_name: str = ""        # circuit_short_name from OpenF1
+    locality: str = ""            # e.g. "Marina Bay"
+    country: str = ""             # e.g. "Singapore"
+    country_code: str = ""        # e.g. "SGP"
+    meeting_key: int = 0
+    date: str = ""                # race date "YYYY-MM-DD"
+    time: str = ""                # race time "HH:MM:SSZ"
+
+    # Optional sub-sessions
+    first_practice: F1SessionSlot | None = None
+    second_practice: F1SessionSlot | None = None
+    third_practice: F1SessionSlot | None = None
+    qualifying: F1SessionSlot | None = None
+    sprint: F1SessionSlot | None = None
+    sprint_qualifying: F1SessionSlot | None = None
+
+    # Results (populated only when fetched via result endpoints)
+    race_results: list[F1RaceResult] = Field(default_factory=list)
+    qualifying_results: list[F1QualifyingResult] = Field(default_factory=list)
+    sprint_results: list[F1SprintResult] = Field(default_factory=list)
+
+    @property
+    def round_int(self) -> int:
+        try:
+            return int(self.round)
+        except ValueError:
+            return 0
+
+    @property
+    def is_sprint_weekend(self) -> bool:
+        return self.sprint is not None
+
+
+# ── Jolpica-F1 models (standings only) ─────────────────────────────────────────
 
 
 class JolpicaDriver(BaseModel):
@@ -65,165 +175,6 @@ class JolpicaConstructor(BaseModel):
     constructor_id: str = Field("", alias="constructorId")
     name: str = ""
     nationality: str = ""
-
-
-class JolpicaTime(BaseModel):
-    """Generic time entry used in RaceResult / SprintResult."""
-
-    model_config = _CFG
-
-    millis: str | None = None
-    time: str | None = None
-
-
-class JolpicaFastestLap(BaseModel):
-    model_config = _CFG
-
-    rank: str = ""
-    lap: str = ""
-    time: JolpicaTime | None = None
-
-
-class JolpicaRaceResult(BaseModel):
-    model_config = _CFG
-
-    number: str = ""
-    position: str = "0"
-    position_text: str = Field("", alias="positionText")
-    points: str = "0"
-    driver: JolpicaDriver = Field(default_factory=JolpicaDriver, alias="Driver")
-    constructor: JolpicaConstructor = Field(
-        default_factory=JolpicaConstructor, alias="Constructor"
-    )
-    grid: str = ""
-    laps: str = ""
-    status: str = ""
-    time: JolpicaTime | None = Field(None, alias="Time")
-    fastest_lap: JolpicaFastestLap | None = Field(None, alias="FastestLap")
-
-    @property
-    def pos_int(self) -> int:
-        try:
-            return int(self.position)
-        except ValueError:
-            return 99
-
-
-class JolpicaQualifyingResult(BaseModel):
-    model_config = _CFG
-
-    number: str = ""
-    position: str = "0"
-    driver: JolpicaDriver = Field(default_factory=JolpicaDriver, alias="Driver")
-    constructor: JolpicaConstructor = Field(
-        default_factory=JolpicaConstructor, alias="Constructor"
-    )
-    q1: str = Field("—", alias="Q1")
-    q2: str = Field("—", alias="Q2")
-    q3: str = Field("—", alias="Q3")
-
-    @field_validator("q1", "q2", "q3", mode="before")
-    @classmethod
-    def _default_dash(cls, v: object) -> str:
-        return str(v) if v else "—"
-
-    @property
-    def pos_int(self) -> int:
-        try:
-            return int(self.position)
-        except ValueError:
-            return 99
-
-
-class JolpicaSprintResult(BaseModel):
-    model_config = _CFG
-
-    number: str = ""
-    position: str = "0"
-    position_text: str = Field("", alias="positionText")
-    points: str = "0"
-    driver: JolpicaDriver = Field(default_factory=JolpicaDriver, alias="Driver")
-    constructor: JolpicaConstructor = Field(
-        default_factory=JolpicaConstructor, alias="Constructor"
-    )
-    grid: str = ""
-    laps: str = ""
-    status: str = ""
-    time: JolpicaTime | None = Field(None, alias="Time")
-
-    @property
-    def pos_int(self) -> int:
-        try:
-            return int(self.position)
-        except ValueError:
-            return 99
-
-
-class JolpicaSessionSchedule(BaseModel):
-    """A weekend sub-session slot (FP1, Qualifying, Sprint, etc.)."""
-
-    model_config = _CFG
-
-    date: str = ""
-    time: str = ""
-
-
-class JolpicaCircuitLocation(BaseModel):
-    model_config = _CFG
-
-    locality: str = ""
-    country: str = ""
-
-
-class JolpicaCircuit(BaseModel):
-    model_config = _CFG
-
-    circuit_id: str = Field("", alias="circuitId")
-    circuit_name: str = Field("", alias="circuitName")
-    location: JolpicaCircuitLocation = Field(
-        default_factory=JolpicaCircuitLocation, alias="Location"
-    )
-
-
-class JolpicaRace(BaseModel):
-    """Full race-weekend entry from the Jolpica schedule / results endpoints."""
-
-    model_config = _CFG
-
-    season: str = ""
-    round: str = "0"
-    race_name: str = Field("", alias="raceName")
-    circuit: JolpicaCircuit = Field(default_factory=JolpicaCircuit, alias="Circuit")
-    date: str = ""
-    time: str = ""
-
-    # Optional sub-sessions (only present when the round has them)
-    first_practice: JolpicaSessionSchedule | None = Field(None, alias="FirstPractice")
-    second_practice: JolpicaSessionSchedule | None = Field(None, alias="SecondPractice")
-    third_practice: JolpicaSessionSchedule | None = Field(None, alias="ThirdPractice")
-    sprint_qualifying: JolpicaSessionSchedule | None = Field(
-        None, alias="SprintQualifying"
-    )
-    sprint: JolpicaSessionSchedule | None = Field(None, alias="Sprint")
-    qualifying: JolpicaSessionSchedule | None = Field(None, alias="Qualifying")
-
-    # Results (only present when fetched via results / qualifying / sprint endpoints)
-    race_results: list[JolpicaRaceResult] = Field([], alias="Results")
-    qualifying_results: list[JolpicaQualifyingResult] = Field(
-        [], alias="QualifyingResults"
-    )
-    sprint_results: list[JolpicaSprintResult] = Field([], alias="SprintResults")
-
-    @property
-    def round_int(self) -> int:
-        try:
-            return int(self.round)
-        except ValueError:
-            return 0
-
-    @property
-    def is_sprint_weekend(self) -> bool:
-        return self.sprint is not None
 
 
 class JolpicaDriverStanding(BaseModel):
@@ -278,6 +229,7 @@ class OpenF1Session(BaseModel):
     country_name: str = ""
     location: str = ""
     year: int = 0
+    meeting_key: int = 0
 
 
 class OpenF1Driver(BaseModel):
@@ -319,8 +271,16 @@ class OpenF1Meeting(BaseModel):
 
     meeting_key: int = 0
     meeting_name: str = ""
+    meeting_official_name: str = ""
     country_name: str = ""
+    country_code: str = ""
     circuit_short_name: str = ""
+    circuit_key: int = 0
+    location: str = ""
+    date_start: str = ""
+    date_end: str = ""
+    year: int = 0
+    gmt_offset: str = ""
 
 
 # ── Convenient type aliases (TYPE_CHECKING only — not evaluated at runtime) ────
@@ -333,8 +293,8 @@ class OpenF1Meeting(BaseModel):
 if TYPE_CHECKING:
     from typing import TypeAlias
 
-    ScheduleResult: TypeAlias = Success[list[JolpicaRace]] | Failure
-    RaceResult: TypeAlias = Success[JolpicaRace] | Failure
+    ScheduleResult: TypeAlias = Success[list[F1RaceWeekend]] | Failure
+    RaceResult: TypeAlias = Success[F1RaceWeekend] | Failure
     StandingsResult: TypeAlias = Success[list[JolpicaDriverStanding]] | Failure
     ConstructorStandingsResult: TypeAlias = (
         Success[list[JolpicaConstructorStanding]] | Failure

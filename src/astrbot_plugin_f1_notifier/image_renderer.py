@@ -15,18 +15,18 @@ from __future__ import annotations
 
 import io
 import tempfile
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import aiohttp
 import cairosvg
 from PIL import Image, ImageDraw, ImageFont
 
 from .models import (
+    F1RaceWeekend,
+    F1SessionSlot,
     JolpicaConstructorStanding,
     JolpicaDriverStanding,
-    JolpicaRace,
-    JolpicaSessionSchedule,
     OpenF1Driver,
     OpenF1Position,
     OpenF1Session,
@@ -195,21 +195,26 @@ def _cc_to_twemoji_stem(code: str) -> str:
     return "-".join(f"{0x1F1E6 + ord(c) - ord('A'):x}" for c in code.upper())
 
 
-def _download_to_file(url: str, dest: Path, timeout: int = 5) -> bool:
+async def _download_to_file(url: str, dest: Path, timeout: int = 5) -> bool:
     """Download a URL to a local file. Returns True on success."""
     if not url.startswith(("http://", "https://")):
         return False
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "AstrBot/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(resp.read())
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"User-Agent": "AstrBot/1.0"},
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                resp.raise_for_status()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(await resp.read())
         return True
     except Exception:
         return False
 
 
-def _load_flag_image(country: str, size: int = 20) -> Image.Image | None:
+async def _load_flag_image(country: str, size: int = 20) -> Image.Image | None:
     """Load a flag image (twemoji SVG) for a country name."""
     code = FLAG_MAP.get(country)
     if not code:
@@ -220,7 +225,7 @@ def _load_flag_image(country: str, size: int = 20) -> Image.Image | None:
         url = (
             f"https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/svg/{stem}.svg"
         )
-        if not _download_to_file(url, svg_path):
+        if not await _download_to_file(url, svg_path):
             return None
     try:
         png_data = cairosvg.svg2png(
@@ -244,7 +249,7 @@ def _make_circular(source: Image.Image, size: int) -> Image.Image:
     return result
 
 
-def _load_headshot(url: str | None, size: int = 32) -> Image.Image | None:
+async def _load_headshot(url: str | None, size: int = 32) -> Image.Image | None:
     """Download and cache driver headshot as a circular image."""
     if not url:
         return None
@@ -254,9 +259,14 @@ def _load_headshot(url: str | None, size: int = 32) -> Image.Image | None:
         cached = _HEADSHOTS_CACHE[url]
         return cached.copy() if cached else None
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "AstrBot/1.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310
-            data = resp.read(1024 * 1024)  # Max 1MB
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"User-Agent": "AstrBot/1.0"},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.content.read(1024 * 1024)  # Max 1 MB
         raw = Image.open(io.BytesIO(data)).convert("RGBA")
         result = _make_circular(raw, size)
         _HEADSHOTS_CACHE[url] = result
@@ -266,7 +276,7 @@ def _load_headshot(url: str | None, size: int = 32) -> Image.Image | None:
         return None
 
 
-def _draw_flagged_text(
+async def _draw_flagged_text(
     img: Image.Image,
     draw: ImageDraw.ImageDraw,
     xy: tuple[int, int],
@@ -278,7 +288,7 @@ def _draw_flagged_text(
 ) -> None:
     """Draw an optional flag image followed by text."""
     x, y_pos = xy
-    flag_img = _load_flag_image(country, flag_size)
+    flag_img = await _load_flag_image(country, flag_size)
     if flag_img is not None:
         flag_y = y_pos + max(0, (font.size - flag_size) // 2)
         img.paste(flag_img, (x, int(flag_y)), flag_img)
@@ -307,15 +317,12 @@ def _parse_openf1_team_colour(drv: OpenF1Driver) -> tuple[int, int, int] | None:
 
 def _utc_to_cst(date_str: str, time_str: str) -> str:
     try:
-        dt_utc = datetime.strptime(
-            f"{date_str}T{time_str.rstrip('Z')}", "%Y-%m-%dT%H:%M:%S"
-        ).replace(tzinfo=timezone.utc)
-        return dt_utc.astimezone(CST).strftime("%m-%d %H:%M")
-    except ValueError:
+        return datetime.fromisoformat(f"{date_str}T{time_str}").astimezone(CST).strftime("%m-%d %H:%M")
+    except (ValueError, TypeError, AttributeError):
         return f"{date_str} {time_str}"
 
 
-def _session_cst(s: JolpicaSessionSchedule | None) -> str | None:
+def _session_cst(s: F1SessionSlot | None) -> str | None:
     if s is None:
         return None
     return _utc_to_cst(s.date, s.time)
@@ -416,7 +423,7 @@ def _save_image(img: Image.Image) -> str:
 # ── Drawing primitives ─────────────────────────────────────────────────────────
 
 
-def _create_card(
+async def _create_card(
     n_rows: int,
     header_title: str,
     header_sub: str,
@@ -439,7 +446,7 @@ def _create_card(
     # Header text
     title_font = _font("ExtraBold", 18)
     sub_font = _font("Medium", 11)
-    _draw_flagged_text(
+    await _draw_flagged_text(
         img, draw, (_s(28), _s(18)), country, header_title, title_font, WHITE, flag_size=_s(22)
     )
     draw.text((_s(28), _s(46)), header_sub, fill=(255, 255, 255, 220), font=sub_font)
@@ -478,7 +485,7 @@ def _draw_footer(draw: ImageDraw.ImageDraw, img_h: int) -> None:
     )
 
 
-def _draw_driver_row(
+async def _draw_driver_row(
     img: Image.Image,
     draw: ImageDraw.ImageDraw,
     y: int,
@@ -527,7 +534,7 @@ def _draw_driver_row(
     circle_y = row_y0 + (ROW_H - _s(36)) // 2
     circle_r = _s(18)
 
-    headshot = _load_headshot(headshot_url, _s(32))
+    headshot = await _load_headshot(headshot_url, _s(32))
     if headshot is not None:
         # Team colour circle border
         draw.ellipse(
@@ -669,18 +676,18 @@ def _draw_constructor_row(
 # ── Schedule / next race drawing ───────────────────────────────────────────────
 
 
-def _draw_schedule_item(
+async def _draw_schedule_item(
     img: Image.Image,
     draw: ImageDraw.ImageDraw,
     y: int,
-    race: JolpicaRace,
+    race: F1RaceWeekend,
 ) -> int:
     """Draw a single schedule item block. Returns new y position."""
     x0 = ROW_MARGIN_X
     x1 = CARD_W - ROW_MARGIN_X
 
     # Collect session times
-    session_slots: list[tuple[JolpicaSessionSchedule | None, str]] = [
+    session_slots: list[tuple[F1SessionSlot | None, str]] = [
         (race.first_practice, "FP1"),
         (race.sprint_qualifying, "Sprint Quali"),
         (race.second_practice, "FP2"),
@@ -709,7 +716,7 @@ def _draw_schedule_item(
 
     # Circuit SVG on the right side
     circ_size = min(item_h - _s(16), _s(90))
-    circuit_img = _load_circuit_image(race.circuit.circuit_id, circ_size)
+    circuit_img = _load_circuit_image(race.circuit_id, circ_size)
     if circuit_img is not None:
         alpha = circuit_img.split()[3].point(lambda p: int(p * 0.45))
         circuit_img.putalpha(alpha)
@@ -740,11 +747,11 @@ def _draw_schedule_item(
 
     # Race name with flag image
     title_font = _font("Bold", 14)
-    _draw_flagged_text(
+    await _draw_flagged_text(
         img,
         draw,
         (x0 + _s(16), y + _s(24)),
-        race.circuit.location.country,
+        race.country,
         race.race_name,
         title_font,
         WHITE,
@@ -768,106 +775,106 @@ def _draw_schedule_item(
 # ── Public render functions ────────────────────────────────────────────────────
 
 
-def render_race_result(race: JolpicaRace) -> str:
+async def render_race_result(race: F1RaceWeekend) -> str:
     """Render race result as a PNG image. Returns file path."""
     n = len(race.race_results)
-    img, draw, y = _create_card(
+    img, draw, y = await _create_card(
         n,
         race.race_name,
         f"ROUND {race.round} · RACE RESULT",
-        circuit_id=race.circuit.circuit_id,
-        country=race.circuit.location.country,
+        circuit_id=race.circuit_id,
+        country=race.country,
     )
     for res in race.race_results:
-        pos = res.pos_int
-        colour = _team_colour(res.constructor.name)
-        time_val = res.time.time if res.time else res.status
+        pos = res.position
+        colour = _team_colour(res.team_name)
+        time_val = res.time if res.time else res.status
         stats = [("TIME", time_val or "-"), ("LAPS", res.laps), ("PTS", res.points)]
-        y = _draw_driver_row(
+        y = await _draw_driver_row(
             img,
             draw,
             y,
             pos,
-            f"{res.driver.given_name} {res.driver.family_name}",
-            res.constructor.name,
+            f"{res.driver_first_name} {res.driver_last_name}",
+            res.team_name,
             colour,
-            acronym=res.driver.family_name[:3],
+            acronym=res.driver_last_name[:3],
             stats=stats,
         )
     _draw_footer(draw, img.height)
     return _save_image(img)
 
 
-def render_qualifying_result(race: JolpicaRace) -> str:
+async def render_qualifying_result(race: F1RaceWeekend) -> str:
     """Render qualifying result as a PNG image. Returns file path."""
     n = len(race.qualifying_results)
-    img, draw, y = _create_card(
+    img, draw, y = await _create_card(
         n,
         race.race_name,
         f"ROUND {race.round} · QUALIFYING",
-        circuit_id=race.circuit.circuit_id,
-        country=race.circuit.location.country,
+        circuit_id=race.circuit_id,
+        country=race.country,
     )
     for res in race.qualifying_results:
-        pos = res.pos_int
-        colour = _team_colour(res.constructor.name)
+        pos = res.position
+        colour = _team_colour(res.team_name)
         stats = [("Q1", res.q1), ("Q2", res.q2), ("Q3", res.q3)]
-        y = _draw_driver_row(
+        y = await _draw_driver_row(
             img,
             draw,
             y,
             pos,
-            f"{res.driver.given_name} {res.driver.family_name}",
-            res.constructor.name,
+            f"{res.driver_first_name} {res.driver_last_name}",
+            res.team_name,
             colour,
-            acronym=res.driver.family_name[:3],
+            acronym=res.driver_last_name[:3],
             stats=stats,
         )
     _draw_footer(draw, img.height)
     return _save_image(img)
 
 
-def render_sprint_result(race: JolpicaRace) -> str:
+async def render_sprint_result(race: F1RaceWeekend) -> str:
     """Render sprint result as a PNG image. Returns file path."""
     n = len(race.sprint_results)
-    img, draw, y = _create_card(
+    img, draw, y = await _create_card(
         n,
         race.race_name,
         f"ROUND {race.round} · SPRINT",
-        circuit_id=race.circuit.circuit_id,
-        country=race.circuit.location.country,
+        circuit_id=race.circuit_id,
+        country=race.country,
     )
     for res in race.sprint_results:
-        pos = res.pos_int
-        colour = _team_colour(res.constructor.name)
-        time_val = res.time.time if res.time else res.status
+        pos = res.position
+        colour = _team_colour(res.team_name)
+        time_val = res.time if res.time else res.status
         stats = [("TIME", time_val or "-"), ("PTS", res.points)]
-        y = _draw_driver_row(
+        y = await _draw_driver_row(
             img,
             draw,
             y,
             pos,
-            f"{res.driver.given_name} {res.driver.family_name}",
-            res.constructor.name,
+            f"{res.driver_first_name} {res.driver_last_name}",
+            res.team_name,
             colour,
-            acronym=res.driver.family_name[:3],
+            acronym=res.driver_last_name[:3],
             stats=stats,
         )
     _draw_footer(draw, img.height)
     return _save_image(img)
 
 
-def render_driver_standings(
+async def render_driver_standings(
     standings: list[JolpicaDriverStanding], limit: int = 10
 ) -> str:
     """Render driver standings as a PNG image. Returns file path."""
     entries = standings[:limit]
-    img, draw, y = _create_card(len(entries), "DRIVER STANDINGS", "CHAMPIONSHIP")
+    img, draw, y = await _create_card(len(entries), "DRIVER STANDINGS", "CHAMPIONSHIP")
     for entry in entries:
         pos = entry.pos_int
         colour = _team_colour(entry.primary_team)
         stats = [("WINS", entry.wins), ("POINTS", entry.points)]
-        y = _draw_driver_row(
+        y = await _draw_driver_row(
             img,
             draw,
             y,
@@ -882,11 +889,11 @@ def render_driver_standings(
     return _save_image(img)
 
 
-def render_constructor_standings(
+async def render_constructor_standings(
     standings: list[JolpicaConstructorStanding],
 ) -> str:
     """Render constructor standings as a PNG image. Returns file path."""
-    img, draw, y = _create_card(len(standings), "CONSTRUCTOR STANDINGS", "CHAMPIONSHIP")
+    img, draw, y = await _create_card(len(standings), "CONSTRUCTOR STANDINGS", "CHAMPIONSHIP")
     for entry in standings:
         pos = entry.pos_int
         colour = _team_colour(entry.constructor.name)
@@ -898,18 +905,16 @@ def render_constructor_standings(
     return _save_image(img)
 
 
-def render_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
+async def render_schedule(races: list[F1RaceWeekend], limit: int = 5) -> str:
     """Render upcoming schedule as a PNG image. Returns file path."""
     now = datetime.now(timezone.utc)
-    upcoming: list[JolpicaRace] = []
+    upcoming: list[F1RaceWeekend] = []
     for race in races:
         try:
-            dt_utc = datetime.strptime(
-                f"{race.date}T{race.time.rstrip('Z')}", "%Y-%m-%dT%H:%M:%S"
-            ).replace(tzinfo=timezone.utc)
+            dt_utc = datetime.fromisoformat(f"{race.date}T{race.time}")
             if dt_utc >= now:
                 upcoming.append(race)
-        except ValueError:
+        except (ValueError, TypeError, AttributeError):
             continue
     upcoming = upcoming[:limit]
 
@@ -931,7 +936,7 @@ def render_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
     # Pre-calculate total height
     total_items_h = 0
     for race in upcoming:
-        session_slots: list[tuple[JolpicaSessionSchedule | None, str]] = [
+        session_slots: list[tuple[F1SessionSlot | None, str]] = [
             (race.first_practice, "FP1"),
             (race.sprint_qualifying, "Sprint Quali"),
             (race.second_practice, "FP2"),
@@ -961,19 +966,19 @@ def render_schedule(races: list[JolpicaRace], limit: int = 5) -> str:
 
     y = HEADER_H + _s(8)
     for race in upcoming:
-        y = _draw_schedule_item(img, draw, y, race)
+        y = await _draw_schedule_item(img, draw, y, race)
 
     _draw_footer(draw, img.height)
     return _save_image(img)
 
 
-def render_next_race(race: JolpicaRace) -> str:
+async def render_next_race(race: F1RaceWeekend) -> str:
     """Render next race weekend timetable as a PNG image. Returns file path."""
-    circuit_name = race.circuit.circuit_name
-    locality = race.circuit.location.locality
-    country = race.circuit.location.country
+    circuit_name = race.circuit_name
+    locality = race.locality
+    country = race.country
 
-    session_slots: list[tuple[JolpicaSessionSchedule | None, str]] = [
+    session_slots: list[tuple[F1SessionSlot | None, str]] = [
         (race.first_practice, "FP1"),
         (race.sprint_qualifying, "Sprint Qualifying"),
         (race.second_practice, "FP2"),
@@ -999,7 +1004,7 @@ def render_next_race(race: JolpicaRace) -> str:
 
     title_font = _font("ExtraBold", 18)
     sub_font = _font("Medium", 11)
-    _draw_flagged_text(
+    await _draw_flagged_text(
         img, draw, (_s(28), _s(18)), country, race.race_name, title_font, WHITE, flag_size=_s(22)
     )
     draw.text(
@@ -1013,7 +1018,7 @@ def render_next_race(race: JolpicaRace) -> str:
     logo = _load_f1_logo(_s(128))
     if logo is not None:
         img.paste(logo, (CARD_W - _s(28) - logo.width, (HEADER_H - logo.height) // 2), logo)
-    circuit_img = _load_circuit_image(race.circuit.circuit_id, _s(56))
+    circuit_img = _load_circuit_image(race.circuit_id, _s(56))
     if circuit_img is not None:
         alpha = circuit_img.split()[3].point(lambda p: int(p * 0.3))
         circuit_img.putalpha(alpha)
@@ -1042,7 +1047,7 @@ def render_next_race(race: JolpicaRace) -> str:
 
     # Race name big
     big_font = _font("ExtraBold", 20)
-    _draw_flagged_text(
+    await _draw_flagged_text(
         img, draw, (_s(24), y), country, race.race_name, big_font, WHITE, flag_size=_s(24)
     )
     y += _s(28)
@@ -1076,7 +1081,7 @@ def render_next_race(race: JolpicaRace) -> str:
     return _save_image(img)
 
 
-def render_practice_result(
+async def render_practice_result(
     session: OpenF1Session,
     results: list[OpenF1SessionResult],
     drivers_by_number: dict[int, OpenF1Driver],
@@ -1086,7 +1091,7 @@ def render_practice_result(
     """Render practice result as a PNG image. Returns file path."""
     circuit = session.circuit_short_name or session.location
     n = len(results)
-    img, draw, y = _create_card(
+    img, draw, y = await _create_card(
         n,
         circuit,
         f"FREE PRACTICE {fp_number} · RESULTS",
@@ -1105,7 +1110,7 @@ def render_practice_result(
             gap_str = f"+{entry.gap_to_leader:.3f}s"
 
         stats = [("BEST LAP", lap_time), ("GAP", gap_str or "LEADER")]
-        y = _draw_driver_row(
+        y = await _draw_driver_row(
             img,
             draw,
             y,
@@ -1121,21 +1126,21 @@ def render_practice_result(
     return _save_image(img)
 
 
-def render_starting_grid(
+async def render_starting_grid(
     drivers_by_number: dict[int, OpenF1Driver],
     grid: list[OpenF1Position],
     circuit_id: str = "",
 ) -> str:
     """Render starting grid as a PNG image. Returns file path."""
     n = len(grid)
-    img, draw, y = _create_card(n, "STARTING GRID", "RACE DAY", circuit_id=circuit_id)
+    img, draw, y = await _create_card(n, "STARTING GRID", "RACE DAY", circuit_id=circuit_id)
     for entry in grid:
         pos = entry.position
         drv = drivers_by_number.get(
             entry.driver_number, OpenF1Driver(driver_number=entry.driver_number)
         )
         colour = _parse_openf1_team_colour(drv) or _team_colour(drv.team_name or "")
-        y = _draw_driver_row(
+        y = await _draw_driver_row(
             img,
             draw,
             y,
@@ -1150,6 +1155,6 @@ def render_starting_grid(
     return _save_image(img)
 
 
-def render_weekend_start(race: JolpicaRace) -> str:
+async def render_weekend_start(race: F1RaceWeekend) -> str:
     """Render weekend start notification. Returns file path."""
-    return render_next_race(race)
+    return await render_next_race(race)

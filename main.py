@@ -114,7 +114,7 @@ class F1NotifierPlugin(Star):
         match result:
             case Success(value=races):
                 text = fmt.format_schedule(races)
-                image_path = img.render_schedule(races)
+                image_path = await img.render_schedule(races)
                 yield await self._render_or_text(event, text, image_path)
             case Failure(error=err):
                 logger.error(f"[F1Notifier] /f1 schedule error: {err}")
@@ -139,7 +139,7 @@ class F1NotifierPlugin(Star):
                     )
                 else:
                     text = fmt.format_next_race(next_race)
-                    image_path = img.render_next_race(next_race)
+                    image_path = await img.render_next_race(next_race)
                     yield await self._render_or_text(event, text, image_path)
             case Failure(error=err):
                 logger.error(f"[F1Notifier] /f1 next error: {err}")
@@ -153,7 +153,7 @@ class F1NotifierPlugin(Star):
         match result:
             case Success(value=race) if race.race_results:
                 text = fmt.format_race_result(race)
-                image_path = img.render_race_result(race)
+                image_path = await img.render_race_result(race)
                 yield await self._render_or_text(event, text, image_path)
             case Success():
                 yield event.plain_result("⏳ 正赛结果暂未公布，请比赛结束后再试。")
@@ -169,7 +169,7 @@ class F1NotifierPlugin(Star):
         match result:
             case Success(value=race) if race.qualifying_results:
                 text = fmt.format_qualifying_result(race)
-                image_path = img.render_qualifying_result(race)
+                image_path = await img.render_qualifying_result(race)
                 yield await self._render_or_text(event, text, image_path)
             case Success():
                 yield event.plain_result("⏳ 排位赛结果暂未公布，请稍后再试。")
@@ -185,7 +185,7 @@ class F1NotifierPlugin(Star):
         match result:
             case Success(value=race) if race.sprint_results:
                 text = fmt.format_sprint_result(race)
-                image_path = img.render_sprint_result(race)
+                image_path = await img.render_sprint_result(race)
                 yield await self._render_or_text(event, text, image_path)
             case Success():
                 yield event.plain_result("⏳ 冲刺赛结果暂未公布，或该站无冲刺赛。")
@@ -225,7 +225,7 @@ class F1NotifierPlugin(Star):
                         text = fmt.format_practice_result(
                             of1_session, results, drivers_by_num, normalized
                         )
-                        image_path = img.render_practice_result(
+                        image_path = await img.render_practice_result(
                             of1_session, results, drivers_by_num, normalized
                         )
                         yield await self._render_or_text(event, text, image_path)
@@ -251,7 +251,7 @@ class F1NotifierPlugin(Star):
                 match result:
                     case Success(value=standings):
                         text = fmt.format_constructor_standings(standings)
-                        image_path = img.render_constructor_standings(standings)
+                        image_path = await img.render_constructor_standings(standings)
                         yield await self._render_or_text(event, text, image_path)
                     case Failure(error=err):
                         logger.error(f"[F1Notifier] /f1 standings teams error: {err}")
@@ -261,7 +261,7 @@ class F1NotifierPlugin(Star):
                 match result:
                     case Success(value=standings):
                         text = fmt.format_driver_standings(standings)
-                        image_path = img.render_driver_standings(standings)
+                        image_path = await img.render_driver_standings(standings)
                         yield await self._render_or_text(event, text, image_path)
                     case Failure(error=err):
                         logger.error(f"[F1Notifier] /f1 standings drivers error: {err}")

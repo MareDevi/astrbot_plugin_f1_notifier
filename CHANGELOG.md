@@ -1,3 +1,17 @@
+## [1.1.1] - 2026-03-07
+
+### 🚀 Features
+
+- Update version to 1.1.0 in CHANGELOG, metadata, and pyproject.toml; enhance F1NotifierPlugin description
+- Improve rendered image clarity with 2x scale factor
+- Draw circuit SVG on right side of each schedule item
+- Add headshot_url to race, qualifying, and sprint result models and rendering functions
+- Add date_end and race_date_end fields to models and update related functions for accurate session timing
+- Enhance image rendering and caching configuration with new parameters
+
+### ⚙️ Miscellaneous Tasks
+
+- Remove unused SVG flag assets
 ## [1.1.0] - 2026-03-06
 
 ### 🚀 Features

@@ -495,6 +495,7 @@ async def _draw_driver_row(
     team_colour: tuple[int, int, int],
     acronym: str = "",
     stats: list[tuple[str, str]] | None = None,
+    stat_col_widths: list[int] | None = None,
     headshot_url: str | None = None,
 ) -> int:
     """Draw a single driver/result row. Returns new y position."""
@@ -576,10 +577,13 @@ async def _draw_driver_row(
         stat_x = x1 - _s(16)
         label_font = _font("Regular", 8)
         value_font = _font("SemiBold", 12)
-        for label, value in reversed(stats):
-            vbbox = draw.textbbox((0, 0), value, font=value_font)
-            lbbox = draw.textbbox((0, 0), label, font=label_font)
-            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
+        for i, (label, value) in enumerate(reversed(stats)):
+            if stat_col_widths is not None:
+                col_w = stat_col_widths[len(stats) - 1 - i]
+            else:
+                vbbox = draw.textbbox((0, 0), value, font=value_font)
+                lbbox = draw.textbbox((0, 0), label, font=label_font)
+                col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
             draw.text(
                 (stat_x - col_w, row_y0 + _s(8)),
                 label,
@@ -606,6 +610,7 @@ def _draw_constructor_row(
     constructor_name: str,
     team_colour: tuple[int, int, int],
     stats: list[tuple[str, str]] | None = None,
+    stat_col_widths: list[int] | None = None,
 ) -> int:
     """Draw a single constructor row. Returns new y position."""
     x0 = ROW_MARGIN_X
@@ -653,12 +658,15 @@ def _draw_constructor_row(
         label_font = _font("Regular", 8)
         value_font = _font("SemiBold", 12)
         pts_font = _font("ExtraBold", 18)
-        for label, value in reversed(stats):
+        for i, (label, value) in enumerate(reversed(stats)):
             is_pts = label == "POINTS"
             vf = pts_font if is_pts else value_font
-            vbbox = draw.textbbox((0, 0), value, font=vf)
-            lbbox = draw.textbbox((0, 0), label, font=label_font)
-            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
+            if stat_col_widths is not None:
+                col_w = stat_col_widths[len(stats) - 1 - i]
+            else:
+                vbbox = draw.textbbox((0, 0), value, font=vf)
+                lbbox = draw.textbbox((0, 0), label, font=label_font)
+                col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
             draw.text(
                 (stat_x - col_w, row_y0 + _s(8)),
                 label,
@@ -671,6 +679,44 @@ def _draw_constructor_row(
             stat_x -= col_w + _s(16)
 
     return row_y1 + ROW_MARGIN_Y
+
+
+def _calc_stat_col_widths(all_stats: list[list[tuple[str, str]]]) -> list[int]:
+    """Pre-calculate per-column max widths across all rows for aligned stat rendering."""
+    if not all_stats:
+        return []
+    label_font = _font("Regular", 8)
+    value_font = _font("SemiBold", 12)
+    scratch = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    n_cols = max(len(s) for s in all_stats)
+    widths = [0] * n_cols
+    for row_stats in all_stats:
+        for i, (label, value) in enumerate(row_stats):
+            vbbox = scratch.textbbox((0, 0), str(value), font=value_font)
+            lbbox = scratch.textbbox((0, 0), label, font=label_font)
+            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
+            widths[i] = max(widths[i], col_w)
+    return widths
+
+
+def _calc_constructor_stat_col_widths(all_stats: list[list[tuple[str, str]]]) -> list[int]:
+    """Pre-calculate per-column max widths for constructor rows (POINTS uses large font)."""
+    if not all_stats:
+        return []
+    label_font = _font("Regular", 8)
+    value_font = _font("SemiBold", 12)
+    pts_font = _font("ExtraBold", 18)
+    scratch = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    n_cols = max(len(s) for s in all_stats)
+    widths = [0] * n_cols
+    for row_stats in all_stats:
+        for i, (label, value) in enumerate(row_stats):
+            vf = pts_font if label == "POINTS" else value_font
+            vbbox = scratch.textbbox((0, 0), str(value), font=vf)
+            lbbox = scratch.textbbox((0, 0), label, font=label_font)
+            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
+            widths[i] = max(widths[i], col_w)
+    return widths
 
 
 # ── Schedule / next race drawing ───────────────────────────────────────────────
@@ -785,11 +831,14 @@ async def render_race_result(race: F1RaceWeekend) -> str:
         circuit_id=race.circuit_id,
         country=race.country,
     )
-    for res in race.race_results:
+    all_stats = [
+        [("TIME", res.time if res.time else (res.status or "-")), ("LAPS", res.laps), ("PTS", res.points)]
+        for res in race.race_results
+    ]
+    col_widths = _calc_stat_col_widths(all_stats)
+    for res, stats in zip(race.race_results, all_stats):
         pos = res.position
         colour = _team_colour(res.team_name)
-        time_val = res.time if res.time else res.status
-        stats = [("TIME", time_val or "-"), ("LAPS", res.laps), ("PTS", res.points)]
         y = await _draw_driver_row(
             img,
             draw,
@@ -800,6 +849,7 @@ async def render_race_result(race: F1RaceWeekend) -> str:
             colour,
             acronym=res.driver_last_name[:3],
             stats=stats,
+            stat_col_widths=col_widths,
             headshot_url=res.headshot_url,
         )
     _draw_footer(draw, img.height)
@@ -816,10 +866,14 @@ async def render_qualifying_result(race: F1RaceWeekend) -> str:
         circuit_id=race.circuit_id,
         country=race.country,
     )
-    for res in race.qualifying_results:
+    all_stats = [
+        [("Q1", res.q1), ("Q2", res.q2), ("Q3", res.q3)]
+        for res in race.qualifying_results
+    ]
+    col_widths = _calc_stat_col_widths(all_stats)
+    for res, stats in zip(race.qualifying_results, all_stats):
         pos = res.position
         colour = _team_colour(res.team_name)
-        stats = [("Q1", res.q1), ("Q2", res.q2), ("Q3", res.q3)]
         y = await _draw_driver_row(
             img,
             draw,
@@ -830,6 +884,7 @@ async def render_qualifying_result(race: F1RaceWeekend) -> str:
             colour,
             acronym=res.driver_last_name[:3],
             stats=stats,
+            stat_col_widths=col_widths,
             headshot_url=res.headshot_url,
         )
     _draw_footer(draw, img.height)
@@ -846,11 +901,14 @@ async def render_sprint_result(race: F1RaceWeekend) -> str:
         circuit_id=race.circuit_id,
         country=race.country,
     )
-    for res in race.sprint_results:
+    all_stats = [
+        [("TIME", res.time if res.time else (res.status or "-")), ("PTS", res.points)]
+        for res in race.sprint_results
+    ]
+    col_widths = _calc_stat_col_widths(all_stats)
+    for res, stats in zip(race.sprint_results, all_stats):
         pos = res.position
         colour = _team_colour(res.team_name)
-        time_val = res.time if res.time else res.status
-        stats = [("TIME", time_val or "-"), ("PTS", res.points)]
         y = await _draw_driver_row(
             img,
             draw,
@@ -861,6 +919,7 @@ async def render_sprint_result(race: F1RaceWeekend) -> str:
             colour,
             acronym=res.driver_last_name[:3],
             stats=stats,
+            stat_col_widths=col_widths,
             headshot_url=res.headshot_url,
         )
     _draw_footer(draw, img.height)
@@ -873,10 +932,14 @@ async def render_driver_standings(
     """Render driver standings as a PNG image. Returns file path."""
     entries = standings[:limit]
     img, draw, y = await _create_card(len(entries), "DRIVER STANDINGS", "CHAMPIONSHIP")
-    for entry in entries:
+    all_stats = [
+        [("WINS", entry.wins), ("POINTS", entry.points)]
+        for entry in entries
+    ]
+    col_widths = _calc_stat_col_widths(all_stats)
+    for entry, stats in zip(entries, all_stats):
         pos = entry.pos_int
         colour = _team_colour(entry.primary_team)
-        stats = [("WINS", entry.wins), ("POINTS", entry.points)]
         y = await _draw_driver_row(
             img,
             draw,
@@ -887,6 +950,7 @@ async def render_driver_standings(
             colour,
             acronym=entry.driver.family_name[:3],
             stats=stats,
+            stat_col_widths=col_widths,
         )
     _draw_footer(draw, img.height)
     return _save_image(img)
@@ -897,12 +961,17 @@ async def render_constructor_standings(
 ) -> str:
     """Render constructor standings as a PNG image. Returns file path."""
     img, draw, y = await _create_card(len(standings), "CONSTRUCTOR STANDINGS", "CHAMPIONSHIP")
-    for entry in standings:
+    all_stats = [
+        [("WINS", entry.wins), ("POINTS", entry.points)]
+        for entry in standings
+    ]
+    col_widths = _calc_constructor_stat_col_widths(all_stats)
+    for entry, stats in zip(standings, all_stats):
         pos = entry.pos_int
         colour = _team_colour(entry.constructor.name)
-        stats = [("WINS", entry.wins), ("POINTS", entry.points)]
         y = _draw_constructor_row(
-            img, draw, y, pos, entry.constructor.name, colour, stats=stats
+            img, draw, y, pos, entry.constructor.name, colour,
+            stats=stats, stat_col_widths=col_widths,
         )
     _draw_footer(draw, img.height)
     return _save_image(img)
@@ -1101,8 +1170,8 @@ async def render_practice_result(
         circuit_id=circuit_id,
         country=session.country_name,
     )
+    rows: list[tuple] = []
     for entry in results:
-        pos = entry.position
         drv = drivers_by_number.get(
             entry.driver_number, OpenF1Driver(driver_number=entry.driver_number)
         )
@@ -1111,8 +1180,10 @@ async def render_practice_result(
         gap_str = ""
         if isinstance(entry.gap_to_leader, (int, float)) and entry.gap_to_leader > 0:
             gap_str = f"+{entry.gap_to_leader:.3f}s"
-
         stats = [("BEST LAP", lap_time), ("GAP", gap_str or "LEADER")]
+        rows.append((entry.position, drv, colour, stats))
+    col_widths = _calc_stat_col_widths([r[3] for r in rows])
+    for pos, drv, colour, stats in rows:
         y = await _draw_driver_row(
             img,
             draw,
@@ -1123,6 +1194,7 @@ async def render_practice_result(
             colour,
             acronym=drv.name_acronym or (drv.last_name or "?")[:3],
             stats=stats,
+            stat_col_widths=col_widths,
             headshot_url=drv.headshot_url,
         )
     _draw_footer(draw, img.height)

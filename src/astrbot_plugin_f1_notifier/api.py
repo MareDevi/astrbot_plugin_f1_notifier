@@ -531,15 +531,17 @@ async def get_current_schedule(season: int | str = "current") -> ScheduleResult:
             for s in sessions_by_meeting.get(mk, []):
                 sn = s.get("session_name", "")
                 date_part, time_part = _split_iso_dt(s.get("date_start") or "")
+                date_end_raw = s.get("date_end") or ""
 
                 field = _SESSION_FIELD_MAP.get(sn)
                 if field:
                     kwargs[field] = F1SessionSlot(
-                        date=date_part, time=time_part
+                        date=date_part, time=time_part, date_end=date_end_raw
                     )
                 elif sn == "Race":
                     kwargs["date"] = date_part
                     kwargs["time"] = time_part
+                    kwargs["race_date_end"] = date_end_raw
 
             weekends.append(F1RaceWeekend(**kwargs))
 

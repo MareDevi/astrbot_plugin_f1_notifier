@@ -293,7 +293,7 @@ class F1Scheduler:
     async def _check_practice_sessions(
         self, next_race: F1RaceWeekend, round_num: int, now: datetime
     ) -> None:
-        """Push practice session results once each session has been over for 90 min."""
+        """Push practice session results as soon as each session has ended per OpenF1."""
         fp_sessions = [
             (next_race.first_practice, "1", "fp1_result"),
             (next_race.second_practice, "2", "fp2_result"),
@@ -303,7 +303,16 @@ class F1Scheduler:
             if fp_slot is None:
                 continue
             fp_time = self._parse_utc(fp_slot.date, fp_slot.time)
-            if now > fp_time + timedelta(minutes=90):
+            # Use actual session end time when available; fall back to start + 2 h
+            try:
+                fp_end = (
+                    datetime.fromisoformat(fp_slot.date_end)
+                    if fp_slot.date_end
+                    else fp_time + timedelta(hours=2)
+                )
+            except ValueError:
+                fp_end = fp_time + timedelta(hours=2)
+            if now > fp_end + timedelta(minutes=5):
                 if not self._notified(round_num, event_key):
                     session_res = await api.get_practice_session(fp_num)
                     match session_res:
@@ -374,7 +383,16 @@ class F1Scheduler:
         qual_time = self._parse_utc(
             next_race.qualifying.date, next_race.qualifying.time
         )
-        if now > qual_time + timedelta(hours=2):
+        # Use actual qualifying end time when available; fall back to start + 2 h
+        try:
+            qual_end = (
+                datetime.fromisoformat(next_race.qualifying.date_end)
+                if next_race.qualifying.date_end
+                else qual_time + timedelta(hours=2)
+            )
+        except ValueError:
+            qual_end = qual_time + timedelta(hours=2)
+        if now > qual_end + timedelta(minutes=5):
             if not self._notified(round_num, "qualifying_result"):
                 qual_res = await api.get_qualifying_result(round_num)
                 match qual_res:
@@ -438,11 +456,20 @@ class F1Scheduler:
         self, races: list[F1RaceWeekend], now: datetime
     ) -> None:
         """Push race and sprint results for the most recently finished race."""
-        finished = [
-            r
-            for r in races
-            if ((dt := fmt.race_utc(r)) is not None and dt + timedelta(hours=3) < now)
-        ]
+        finished = []
+        for r in races:
+            race_end = None
+            if r.race_date_end:
+                try:
+                    race_end = datetime.fromisoformat(r.race_date_end)
+                except ValueError:
+                    pass
+            if race_end is None:
+                dt = fmt.race_utc(r)
+                if dt is not None:
+                    race_end = dt + timedelta(hours=3)
+            if race_end is not None and race_end + timedelta(minutes=5) < now:
+                finished.append(r)
         if not finished:
             return
 
@@ -462,10 +489,17 @@ class F1Scheduler:
                     logger.warning(f"[F1Notifier] Race result not ready: {err}")
 
         if latest_finished.sprint is not None:
-            sprint_time = self._parse_utc(
-                latest_finished.sprint.date, latest_finished.sprint.time
-            )
-            if now > sprint_time + timedelta(hours=2):
+            sprint_slot = latest_finished.sprint
+            # Use actual sprint end time when available; fall back to start + 2 h
+            try:
+                sprint_end = (
+                    datetime.fromisoformat(sprint_slot.date_end)
+                    if sprint_slot.date_end
+                    else self._parse_utc(sprint_slot.date, sprint_slot.time) + timedelta(hours=2)
+                )
+            except ValueError:
+                sprint_end = self._parse_utc(sprint_slot.date, sprint_slot.time) + timedelta(hours=2)
+            if now > sprint_end + timedelta(minutes=5):
                 if not self._notified(lf_round, "sprint_result"):
                     sprint_res = await api.get_sprint_result(lf_round)
                     match sprint_res:

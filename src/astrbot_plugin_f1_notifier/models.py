@@ -55,8 +55,9 @@ class F1SessionSlot(BaseModel):
 
     model_config = _CFG
 
-    date: str = ""   # "YYYY-MM-DD"
-    time: str = ""   # "HH:MM:SSZ"
+    date: str = ""      # "YYYY-MM-DD"
+    time: str = ""      # "HH:MM:SSZ"
+    date_end: str = ""  # ISO 8601 end time from OpenF1, e.g. "2024-03-02T08:30:00+00:00"
 
 
 class F1RaceResult(BaseModel):
@@ -130,6 +131,7 @@ class F1RaceWeekend(BaseModel):
     meeting_key: int = 0
     date: str = ""                # race date "YYYY-MM-DD"
     time: str = ""                # race time "HH:MM:SSZ"
+    race_date_end: str = ""       # race session end time from OpenF1
 
     # Optional sub-sessions
     first_practice: F1SessionSlot | None = None
@@ -228,6 +230,7 @@ class OpenF1Session(BaseModel):
     session_key: int = 0
     session_name: str = ""
     date_start: str = ""
+    date_end: str = ""
     circuit_short_name: str = ""
     country_name: str = ""
     location: str = ""

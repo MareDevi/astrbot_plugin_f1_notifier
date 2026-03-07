@@ -33,6 +33,17 @@ from .models import (
     OpenF1SessionResult,
 )
 
+# ── Plugin config (injected at runtime via configure()) ───────────────────────
+
+_renderer_config: dict = {}
+
+
+def configure(config) -> None:
+    """Receive plugin config dict from the main plugin/scheduler."""
+    global _renderer_config
+    _renderer_config = config or {}
+
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "assets"
@@ -236,6 +247,7 @@ async def _load_flag_image(country: str, size: int = 20) -> Image.Image | None:
         return None
 
 
+# url → circular Image (or None on failure); bounded by headshot_cache_max config
 _HEADSHOTS_CACHE: dict[str, Image.Image | None] = {}
 
 
@@ -269,11 +281,23 @@ async def _load_headshot(url: str | None, size: int = 32) -> Image.Image | None:
                 data = await resp.content.read(1024 * 1024)  # Max 1 MB
         raw = Image.open(io.BytesIO(data)).convert("RGBA")
         result = _make_circular(raw, size)
+        _headshot_cache_evict()
         _HEADSHOTS_CACHE[url] = result
         return result.copy()
     except Exception:
+        _headshot_cache_evict()
         _HEADSHOTS_CACHE[url] = None
         return None
+
+
+def _headshot_cache_evict() -> None:
+    """Remove oldest headshot entries when the cache exceeds the configured max."""
+    max_count = int(_renderer_config.get("headshot_cache_max", 30))
+    while len(_HEADSHOTS_CACHE) >= max_count:
+        try:
+            _HEADSHOTS_CACHE.pop(next(iter(_HEADSHOTS_CACHE)))
+        except StopIteration:
+            break
 
 
 async def _draw_flagged_text(
@@ -378,26 +402,43 @@ def _pos_colour(pos: int) -> tuple[int, int, int]:
 
 
 _generated_files: list[tuple[float, str]] = []
-_CLEANUP_MAX_AGE = 1800  # 30 minutes
-_CLEANUP_INTERVAL = 20  # run cleanup every 20 saves
 _save_counter = 0
 
 
+def _get_cleanup_max_age() -> float:
+    """Max age in seconds before cached images are deleted (from config)."""
+    return int(_renderer_config.get("image_cache_max_age", 30)) * 60
+
+
+def _get_cache_max_count() -> int:
+    """Max number of generated image files to keep in the cache list."""
+    return int(_renderer_config.get("image_cache_max_count", 50))
+
+
 def _cleanup_old_images() -> None:
-    """Remove generated temp images older than _CLEANUP_MAX_AGE seconds."""
+    """Remove generated temp images that are too old or exceed the max count."""
     import os
     import time
 
+    max_age = _get_cleanup_max_age()
+    max_count = _get_cache_max_count()
     now = time.time()
     remaining: list[tuple[float, str]] = []
     for ts, fpath in _generated_files:
-        if now - ts > _CLEANUP_MAX_AGE:
+        if now - ts > max_age:
             try:
                 os.remove(fpath)
             except OSError:
                 pass
         else:
             remaining.append((ts, fpath))
+    # Also enforce max count: evict oldest entries first
+    while len(remaining) > max_count:
+        _, fpath = remaining.pop(0)
+        try:
+            os.remove(fpath)
+        except OSError:
+            pass
     _generated_files.clear()
     _generated_files.extend(remaining)
 
@@ -414,7 +455,8 @@ def _save_image(img: Image.Image) -> str:
 
     _generated_files.append((time.time(), path))
     _save_counter += 1
-    if _save_counter % _CLEANUP_INTERVAL == 0:
+    # Trigger cleanup every 20 saves, or whenever the cache exceeds the max count
+    if _save_counter % 20 == 0 or len(_generated_files) > _get_cache_max_count():
         _cleanup_old_images()
 
     return path

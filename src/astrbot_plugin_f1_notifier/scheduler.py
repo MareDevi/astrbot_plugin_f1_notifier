@@ -58,6 +58,8 @@ class F1Scheduler:
         self._state: dict = _default_state()
         self._task: asyncio.Task | None = None
         self._loaded = False
+        # Propagate config to image renderer (controls cache limits, etc.)
+        img.configure(config)
 
     @property
     def _image_mode(self) -> bool:
@@ -66,6 +68,12 @@ class F1Scheduler:
             if self._config
             else False
         )
+
+    @property
+    def _result_poll_delay(self) -> timedelta:
+        """Minutes after a session ends before polling for results."""
+        minutes = int(self._config.get("result_poll_delay", 5)) if self._config else 5
+        return timedelta(minutes=minutes)
 
     # ──────────────── public interface ────────────────
 
@@ -312,7 +320,7 @@ class F1Scheduler:
                 )
             except ValueError:
                 fp_end = fp_time + timedelta(hours=2)
-            if now > fp_end + timedelta(minutes=5):
+            if now > fp_end + self._result_poll_delay:
                 if not self._notified(round_num, event_key):
                     session_res = await api.get_practice_session(fp_num)
                     match session_res:
@@ -392,7 +400,7 @@ class F1Scheduler:
             )
         except ValueError:
             qual_end = qual_time + timedelta(hours=2)
-        if now > qual_end + timedelta(minutes=5):
+        if now > qual_end + self._result_poll_delay:
             if not self._notified(round_num, "qualifying_result"):
                 qual_res = await api.get_qualifying_result(round_num)
                 match qual_res:
@@ -468,7 +476,7 @@ class F1Scheduler:
                 dt = fmt.race_utc(r)
                 if dt is not None:
                     race_end = dt + timedelta(hours=3)
-            if race_end is not None and race_end + timedelta(minutes=5) < now:
+            if race_end is not None and race_end + self._result_poll_delay < now:
                 finished.append(r)
         if not finished:
             return
@@ -499,7 +507,7 @@ class F1Scheduler:
                 )
             except ValueError:
                 sprint_end = self._parse_utc(sprint_slot.date, sprint_slot.time) + timedelta(hours=2)
-            if now > sprint_end + timedelta(minutes=5):
+            if now > sprint_end + self._result_poll_delay:
                 if not self._notified(lf_round, "sprint_result"):
                     sprint_res = await api.get_sprint_result(lf_round)
                     match sprint_res:

@@ -800,6 +800,7 @@ async def render_race_result(race: F1RaceWeekend) -> str:
             colour,
             acronym=res.driver_last_name[:3],
             stats=stats,
+            headshot_url=res.headshot_url,
         )
     _draw_footer(draw, img.height)
     return _save_image(img)
@@ -829,6 +830,7 @@ async def render_qualifying_result(race: F1RaceWeekend) -> str:
             colour,
             acronym=res.driver_last_name[:3],
             stats=stats,
+            headshot_url=res.headshot_url,
         )
     _draw_footer(draw, img.height)
     return _save_image(img)
@@ -859,6 +861,7 @@ async def render_sprint_result(race: F1RaceWeekend) -> str:
             colour,
             acronym=res.driver_last_name[:3],
             stats=stats,
+            headshot_url=res.headshot_url,
         )
     _draw_footer(draw, img.height)
     return _save_image(img)

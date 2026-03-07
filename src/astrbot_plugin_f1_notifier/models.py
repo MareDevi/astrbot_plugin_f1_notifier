@@ -69,6 +69,7 @@ class F1RaceResult(BaseModel):
     driver_first_name: str = ""
     driver_last_name: str = ""
     team_name: str = ""
+    headshot_url: str | None = None
     time: str | None = None     # "1:23:45.678", "+1.234", "+1 LAP" etc.
     laps: str = ""
     points: str = "0"
@@ -85,6 +86,7 @@ class F1QualifyingResult(BaseModel):
     driver_first_name: str = ""
     driver_last_name: str = ""
     team_name: str = ""
+    headshot_url: str | None = None
     q1: str = "—"
     q2: str = "—"
     q3: str = "—"
@@ -105,6 +107,7 @@ class F1SprintResult(BaseModel):
     driver_first_name: str = ""
     driver_last_name: str = ""
     team_name: str = ""
+    headshot_url: str | None = None
     time: str | None = None
     laps: str = ""
     points: str = "0"

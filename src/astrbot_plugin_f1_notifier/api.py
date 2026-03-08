@@ -263,7 +263,7 @@ async def _qualifying_from_openf1(
     meeting: dict = meetings_raw[0] if meetings_raw else {}
 
     qual_results: list[F1QualifyingResult] = []
-    for entry in sorted(results_raw, key=lambda x: x.get("position", 99)):
+    for entry in sorted(results_raw, key=lambda x: x.get("position") or 99):
         driver_num = entry.get("driver_number")
         d = drivers_map.get(driver_num, {})
 
@@ -279,7 +279,7 @@ async def _qualifying_from_openf1(
         last_name = d.get("last_name") or f"#{driver_num}"
         qual_results.append(
             F1QualifyingResult(
-                position=entry.get("position", 99),
+                position=entry.get("position"),
                 driver_name=f"{first_name} {last_name}".strip(),
                 driver_first_name=first_name,
                 driver_last_name=last_name,
@@ -329,14 +329,14 @@ async def _race_from_openf1(
     drivers_map: dict[int, dict] = {d["driver_number"]: d for d in drivers_raw}
     meeting: dict = meetings_raw[0] if meetings_raw else {}
 
-    results_sorted = sorted(results_raw, key=lambda x: x.get("position", 99))
+    results_sorted = sorted(results_raw, key=lambda x: x.get("position") or 99)
     leader_duration = results_sorted[0].get("duration") if results_sorted else None
 
     race_results: list[F1RaceResult] = []
     for entry in results_sorted:
         driver_num = entry.get("driver_number")
         d = drivers_map.get(driver_num, {})
-        pos = entry.get("position", 99)
+        pos = entry.get("position")
 
         if entry.get("dns"):
             status, time_val = "DNS", None
@@ -413,14 +413,14 @@ async def _sprint_from_openf1(
     drivers_map: dict[int, dict] = {d["driver_number"]: d for d in drivers_raw}
     meeting: dict = meetings_raw[0] if meetings_raw else {}
 
-    results_sorted = sorted(results_raw, key=lambda x: x.get("position", 99))
+    results_sorted = sorted(results_raw, key=lambda x: x.get("position") or 99)
     leader_duration = results_sorted[0].get("duration") if results_sorted else None
 
     sprint_results: list[F1SprintResult] = []
     for entry in results_sorted:
         driver_num = entry.get("driver_number")
         d = drivers_map.get(driver_num, {})
-        pos = entry.get("position", 99)
+        pos = entry.get("position")
 
         if entry.get("dns"):
             status, time_val = "DNS", None

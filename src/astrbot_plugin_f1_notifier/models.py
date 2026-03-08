@@ -65,7 +65,7 @@ class F1RaceResult(BaseModel):
 
     model_config = _CFG
 
-    position: int = 99
+    position: int | None = None
     driver_name: str = ""
     driver_first_name: str = ""
     driver_last_name: str = ""
@@ -82,7 +82,7 @@ class F1QualifyingResult(BaseModel):
 
     model_config = _CFG
 
-    position: int = 99
+    position: int | None = None
     driver_name: str = ""
     driver_first_name: str = ""
     driver_last_name: str = ""
@@ -103,7 +103,7 @@ class F1SprintResult(BaseModel):
 
     model_config = _CFG
 
-    position: int = 99
+    position: int | None = None
     driver_name: str = ""
     driver_first_name: str = ""
     driver_last_name: str = ""

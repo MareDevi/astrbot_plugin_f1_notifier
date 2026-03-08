@@ -554,7 +554,7 @@ async def _draw_driver_row(
     elif pos == 3:
         bg = (205, 127, 50, 20)
     else:
-        bg = (255, 255, 255, 15 if pos % 2 == 0 else 10)
+        bg = (255, 255, 255, 15 if (pos or 0) % 2 == 0 else 10)
 
     # Overlay for alpha blending
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -569,7 +569,7 @@ async def _draw_driver_row(
     pos_font = _font("ExtraBold", 20)
     pos_col = _pos_colour(pos)
     draw.text(
-        (x0 + _s(16), row_y0 + (ROW_H - _s(24)) // 2), str(pos), fill=pos_col, font=pos_font
+        (x0 + _s(16), row_y0 + (ROW_H - _s(24)) // 2), str(pos) if pos is not None else "-", fill=pos_col, font=pos_font
     )
 
     # Driver acronym circle or headshot
@@ -632,7 +632,7 @@ async def _draw_driver_row(
                 fill=(255, 255, 255, 130),
                 font=label_font,
             )
-            val_col = RED_ACCENT if label == "PTS" and pos <= 3 else WHITE
+            val_col = RED_ACCENT if label == "PTS" and pos is not None and pos <= 3 else WHITE
             draw.text(
                 (stat_x - col_w, row_y0 + _s(22)),
                 value,
@@ -667,7 +667,7 @@ def _draw_constructor_row(
     elif pos == 3:
         bg = (205, 127, 50, 20)
     else:
-        bg = (255, 255, 255, 15 if pos % 2 == 0 else 10)
+        bg = (255, 255, 255, 15 if (pos or 0) % 2 == 0 else 10)
 
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     ovr_draw = ImageDraw.Draw(overlay)

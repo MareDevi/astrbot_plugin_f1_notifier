@@ -58,7 +58,9 @@ def _flag(country: str) -> str:
     return FLAG_MAP.get(country, "🏁")
 
 
-def _medal(pos: int) -> str:
+def _medal(pos: int | None) -> str:
+    if pos is None:
+        return "  -."
     return POSITION_MEDALS.get(pos, f" {pos:>2}.")
 
 

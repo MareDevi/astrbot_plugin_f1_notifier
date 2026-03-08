@@ -342,7 +342,75 @@ class TestModelsPEP604(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 10. Scheduler no redundant list copy
+# 10. API caching logic
+# ---------------------------------------------------------------------------
+
+class TestApiCaching(unittest.TestCase):
+    """Verify api.py implements the requested caching logic."""
+
+    def test_cache_dict_exists(self):
+        source = _API_SRC.read_text(encoding='utf-8')
+        self.assertIn("_API_CACHE: dict[str, tuple[float, Any]] = {}", source)
+
+    def test_get_cache_key_exists(self):
+        source = _API_SRC.read_text(encoding='utf-8')
+        self.assertIn("def _get_cache_key", source)
+        self.assertIn("sorted(params.items())", source)
+
+    def test_jolpica_uses_cache(self):
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def _jolpica_get.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("_API_CACHE", func_body)
+        self.assertIn("now < expiry", func_body)
+
+    def test_openf1_uses_cache(self):
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def _openf1_get.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("_API_CACHE", func_body)
+        self.assertIn("now < expiry", func_body)
+
+    def test_ttl_logic_exists(self):
+        """Verify different TTLs are used for different endpoints."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        self.assertIn("ttl = 300", source)  # session_result
+        self.assertIn("ttl = 86400", source) # static data
+        self.assertIn("ttl = 3600", source) # year schedule
+
+
+# ---------------------------------------------------------------------------
+# 11. API 429 rate limit backoff
+# ---------------------------------------------------------------------------
+
+class TestApiRateLimitBackoff(unittest.TestCase):
+    """Verify api.py handles 429 status code with a sleep."""
+
+    def test_jolpica_429_sleep(self):
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def _jolpica_get.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("resp.status == 429", func_body)
+        self.assertIn("asyncio.sleep(5)", func_body)
+
+    def test_openf1_429_sleep(self):
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(r'async def _openf1_get.*?(?=\nasync def |\nclass |\Z)', source, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("resp.status == 429", func_body)
+        self.assertIn("asyncio.sleep(5)", func_body)
+
+
+# ---------------------------------------------------------------------------
+# 12. Scheduler no redundant list copy
 # ---------------------------------------------------------------------------
 
 class TestSchedulerNoRedundantList(unittest.TestCase):

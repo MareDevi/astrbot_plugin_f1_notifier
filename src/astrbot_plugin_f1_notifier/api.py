@@ -16,6 +16,7 @@ or ``Failure(error=...)``.  Callers use ``match`` / ``case`` to branch:
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +59,18 @@ _SESSION_LOCK: asyncio.Lock | None = None
 _SESSION_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 _CLIENT_SESSION: aiohttp.ClientSession | None = None
 
+# In-memory cache: {cache_key: (expiry_timestamp, data)}
+_API_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _get_cache_key(base: str, path: str, params: dict[str, Any] | None = None) -> str:
+    """Generate a stable cache key string for a given request."""
+    if not params:
+        return f"{base}{path}"
+    # Sort parameters to ensure consistent key for identical requests
+    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    return f"{base}{path}?{query}"
+
 
 def _ensure_lock() -> asyncio.Lock:
     """Return the session lock, recreating it when the event loop has changed."""
@@ -96,21 +109,60 @@ async def close_session() -> None:
 
 
 async def _jolpica_get(path: str) -> dict[str, Any]:
+    cache_key = _get_cache_key(JOLPICA_BASE, path)
+    now = time.time()
+    if cache_key in _API_CACHE:
+        expiry, value = _API_CACHE[cache_key]
+        if now < expiry:
+            return value
+
     session = await _get_session()
     url = f"{JOLPICA_BASE}{path}"
     async with session.get(url) as resp:
+        if resp.status == 429:
+            # Simple back-off on rate limit
+            await asyncio.sleep(5)
         resp.raise_for_status()
-        return await resp.json(content_type=None)
+        data = await resp.json(content_type=None)
+        # Cache Jolpica for 1 hour by default
+        _API_CACHE[cache_key] = (now + 3600, data)
+        return data
 
 
 async def _openf1_get(
     path: str, params: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
+    cache_key = _get_cache_key(OPENF1_BASE, path, params)
+    now = time.time()
+    if cache_key in _API_CACHE:
+        expiry, value = _API_CACHE[cache_key]
+        if now < expiry:
+            return value
+
+    # Determine TTL based on request specifics
+    ttl = 60  # Default 1 minute
+    p = params or {}
+    if "meeting_key" in p or "session_key" in p:
+        if path == "/session_result":
+            # Session results change during session; cache short
+            ttl = 300  # 5 minutes
+        else:
+            # Drivers, meetings, etc. are largely static once created
+            ttl = 86400  # 24 hours
+    elif "year" in p and path in ("/meetings", "/sessions"):
+        # Full year schedule data doesn't change every minute
+        ttl = 3600  # 1 hour
+
     session = await _get_session()
     url = f"{OPENF1_BASE}{path}"
     async with session.get(url, params=params) as resp:
+        if resp.status == 429:
+            # Simple back-off on rate limit
+            await asyncio.sleep(5)
         resp.raise_for_status()
-        return await resp.json(content_type=None)
+        data = await resp.json(content_type=None)
+        _API_CACHE[cache_key] = (now + ttl, data)
+        return data
 
 
 # ──────────────────────────────────────────────────────────────────────────────

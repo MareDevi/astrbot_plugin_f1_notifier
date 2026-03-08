@@ -1,3 +1,13 @@
+## [1.1.2] - 2026-03-08
+
+### 🚀 Features
+
+- Update version to 1.1.1 in CHANGELOG, metadata, and pyproject.toml; remove unused SVG flag assets
+- Add caching logic to API calls and implement rate limit backoff handling
+
+### 🐛 Bug Fixes
+
+- Update position fields to allow None values in models and adjust related logic for handling positions
 ## [1.1.1] - 2026-03-07
 
 ### 🚀 Features

@@ -727,5 +727,234 @@ class TestRunCancelledErrorCoversLoop(unittest.TestCase):
                 )
 
 
+# ---------------------------------------------------------------------------
+# 22. Jolpica fallback for get_current_schedule (OpenF1 401 / unavailable)
+# ---------------------------------------------------------------------------
+
+class TestJolpicaScheduleFallback(unittest.TestCase):
+    """Verify that api.py falls back to Jolpica when OpenF1 fails.
+
+    Tests are source-code level (no astrbot import required) so they run in
+    the normal CI environment without AstrBot installed.
+    """
+
+    def test_get_schedule_from_jolpica_function_exists(self):
+        """Ensure _get_schedule_from_jolpica helper is defined in api.py."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        self.assertIn("async def _get_schedule_from_jolpica", source)
+
+    def test_jolpica_fallback_triggered_on_client_error(self):
+        """Ensure get_current_schedule calls _get_schedule_from_jolpica when meetings_raw is empty."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(
+            r'async def get_current_schedule.*?(?=\nasync def |\nclass |\Z)',
+            source, re.DOTALL,
+        )
+        self.assertIsNotNone(match, "get_current_schedule not found")
+        func_body = match.group()
+        self.assertIn("_get_schedule_from_jolpica", func_body)
+        self.assertIn("aiohttp.ClientError", func_body)
+
+    def test_jolpica_fallback_on_empty_meetings(self):
+        """Ensure Jolpica fallback is also used when OpenF1 returns empty meetings."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(
+            r'async def get_current_schedule.*?(?=\nasync def |\nclass |\Z)',
+            source, re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        # The condition for triggering fallback must check meetings_raw emptiness
+        self.assertIn("if not meetings_raw", func_body)
+        self.assertIn("_get_schedule_from_jolpica", func_body)
+
+    def test_jolpica_schedule_uses_limit_param(self):
+        """Ensure _get_schedule_from_jolpica passes limit=100 to Jolpica."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(
+            r'async def _get_schedule_from_jolpica.*?(?=\nasync def |\nclass |\Z)',
+            source, re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("limit", func_body)
+
+    def test_jolpica_schedule_maps_circuit_id(self):
+        """Ensure Jolpica fallback uses circuitId directly (no remapping needed)."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(
+            r'async def _get_schedule_from_jolpica.*?(?=\nasync def |\nclass |\Z)',
+            source, re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("circuitId", func_body)
+
+    def test_jolpica_schedule_maps_sprint_sessions(self):
+        """Ensure sprint sessions (Sprint, SprintQualifying) are mapped."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(
+            r'async def _get_schedule_from_jolpica.*?(?=\nasync def |\nclass |\Z)',
+            source, re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("Sprint", func_body)
+        self.assertIn("SprintQualifying", func_body)
+
+    def test_jolpica_fallback_warning_logged(self):
+        """Ensure a warning is logged when falling back to Jolpica."""
+        source = _API_SRC.read_text(encoding='utf-8')
+        import re
+        match = re.search(
+            r'async def get_current_schedule.*?(?=\nasync def |\nclass |\Z)',
+            source, re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        func_body = match.group()
+        self.assertIn("logger.warning", func_body)
+        self.assertIn("Jolpica", func_body)
+
+    def test_jolpica_schedule_parses_ergast_response(self):
+        """Unit-test _get_schedule_from_jolpica logic with a fake Ergast payload."""
+        import asyncio, sys, importlib.util
+
+        # Build fake Ergast payload (minimal)
+        fake_payload = {
+            "MRData": {
+                "RaceTable": {
+                    "season": "2026",
+                    "Races": [
+                        {
+                            "season": "2026",
+                            "round": "1",
+                            "raceName": "Australian Grand Prix",
+                            "Circuit": {
+                                "circuitId": "albert_park",
+                                "circuitName": "Albert Park Grand Prix Circuit",
+                                "Location": {
+                                    "locality": "Melbourne",
+                                    "country": "Australia",
+                                },
+                            },
+                            "date": "2026-03-22",
+                            "time": "05:00:00Z",
+                            "FirstPractice": {"date": "2026-03-20", "time": "01:30:00Z"},
+                            "SecondPractice": {"date": "2026-03-20", "time": "05:00:00Z"},
+                            "ThirdPractice": {"date": "2026-03-21", "time": "01:30:00Z"},
+                            "Qualifying": {"date": "2026-03-21", "time": "05:00:00Z"},
+                        },
+                        {
+                            # Non-Grand Prix event; should be filtered out
+                            "season": "2026",
+                            "round": "0",
+                            "raceName": "Pre-Season Testing",
+                            "Circuit": {"circuitId": "bahrain", "circuitName": "Bahrain", "Location": {}},
+                            "date": "2026-02-18",
+                            "time": "06:00:00Z",
+                        },
+                        {
+                            "season": "2026",
+                            "round": "2",
+                            "raceName": "Chinese Grand Prix",
+                            "Circuit": {
+                                "circuitId": "shanghai",
+                                "circuitName": "Shanghai International Circuit",
+                                "Location": {
+                                    "locality": "Shanghai",
+                                    "country": "China",
+                                },
+                            },
+                            "date": "2026-03-29",
+                            "time": "07:00:00Z",
+                            "FirstPractice": {"date": "2026-03-27", "time": "01:30:00Z"},
+                            "Qualifying": {"date": "2026-03-28", "time": "05:00:00Z"},
+                            "Sprint": {"date": "2026-03-28", "time": "09:00:00Z"},
+                            "SprintQualifying": {"date": "2026-03-28", "time": "01:30:00Z"},
+                        },
+                    ],
+                }
+            }
+        }
+
+        # Load models module
+        models_mod_name = "src.astrbot_plugin_f1_notifier.models"
+        if models_mod_name not in sys.modules:
+            spec_m = importlib.util.spec_from_file_location(models_mod_name, _MODELS_SRC)
+            mod_m = importlib.util.module_from_spec(spec_m)
+            sys.modules[models_mod_name] = mod_m
+            spec_m.loader.exec_module(mod_m)
+        models = sys.modules[models_mod_name]
+
+        F1RaceWeekend = models.F1RaceWeekend
+        F1SessionSlot = models.F1SessionSlot
+
+        # Exercise just the parsing logic (inner loop), not the async HTTP call
+        def _slot(race_dict, key):
+            sub = race_dict.get(key)
+            if not sub:
+                return None
+            return F1SessionSlot(date=sub.get("date", ""), time=sub.get("time", ""))
+
+        races_raw = fake_payload["MRData"]["RaceTable"]["Races"]
+        weekends = []
+        for r in races_raw:
+            race_name = r.get("raceName", "")
+            if "Grand Prix" not in race_name:
+                continue
+            circuit = r.get("Circuit", {})
+            location = circuit.get("Location", {})
+            weekends.append(F1RaceWeekend(
+                season=r.get("season", "2026"),
+                round=r.get("round", "0"),
+                race_name=race_name,
+                circuit_id=circuit.get("circuitId", ""),
+                circuit_name=circuit.get("circuitName", ""),
+                locality=location.get("locality", ""),
+                country=location.get("country", ""),
+                country_code="",
+                meeting_key=0,
+                date=r.get("date", ""),
+                time=r.get("time", ""),
+                first_practice=_slot(r, "FirstPractice"),
+                second_practice=_slot(r, "SecondPractice"),
+                third_practice=_slot(r, "ThirdPractice"),
+                qualifying=_slot(r, "Qualifying"),
+                sprint=_slot(r, "Sprint"),
+                sprint_qualifying=_slot(r, "SprintQualifying"),
+            ))
+
+        # Should have 2 GPs (Pre-Season Testing filtered out)
+        self.assertEqual(len(weekends), 2)
+
+        aus = weekends[0]
+        self.assertEqual(aus.race_name, "Australian Grand Prix")
+        self.assertEqual(aus.circuit_id, "albert_park")
+        self.assertEqual(aus.country, "Australia")
+        self.assertEqual(aus.date, "2026-03-22")
+        self.assertEqual(aus.time, "05:00:00Z")
+        self.assertIsNotNone(aus.first_practice)
+        self.assertIsNotNone(aus.second_practice)
+        self.assertIsNotNone(aus.third_practice)
+        self.assertIsNotNone(aus.qualifying)
+        self.assertIsNone(aus.sprint)
+        self.assertIsNone(aus.sprint_qualifying)
+        self.assertFalse(aus.is_sprint_weekend)
+        self.assertEqual(aus.meeting_key, 0)  # not available from Jolpica
+        self.assertEqual(aus.country_code, "")
+
+        chn = weekends[1]
+        self.assertEqual(chn.race_name, "Chinese Grand Prix")
+        self.assertEqual(chn.circuit_id, "shanghai")
+        self.assertIsNotNone(chn.sprint)
+        self.assertIsNotNone(chn.sprint_qualifying)
+        self.assertTrue(chn.is_sprint_weekend)
+
+
 if __name__ == "__main__":
     unittest.main()

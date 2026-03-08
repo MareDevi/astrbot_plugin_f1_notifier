@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
+from astrbot.api import logger
 
 from .models import (
     F1QualifyingResult,
@@ -95,10 +96,12 @@ async def close_session() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-async def _jolpica_get(path: str) -> dict[str, Any]:
+async def _jolpica_get(
+    path: str, params: dict[str, Any] | None = None
+) -> dict[str, Any]:
     session = await _get_session()
     url = f"{JOLPICA_BASE}{path}"
-    async with session.get(url) as resp:
+    async with session.get(url, params=params) as resp:
         resp.raise_for_status()
         return await resp.json(content_type=None)
 
@@ -475,16 +478,96 @@ async def _sprint_from_openf1(
     )
 
 
+async def _get_schedule_from_jolpica(year: int) -> list[F1RaceWeekend]:
+    """Fetch race schedule from Jolpica (Ergast mirror) for *year*.
+
+    Used as a fallback when OpenF1 is unavailable (e.g. 401 Unauthorized).
+    Returns an empty list if the API returns no races.
+
+    Field mapping from Ergast → F1RaceWeekend:
+      circuitId        → circuit_id   (already in Jolpica ID format, no mapping needed)
+      circuitName      → circuit_name
+      Location.locality → locality
+      Location.country  → country
+      FirstPractice    → first_practice
+      SecondPractice   → second_practice
+      ThirdPractice    → third_practice
+      Qualifying       → qualifying
+      Sprint           → sprint
+      SprintQualifying → sprint_qualifying
+
+    Fields not provided by Jolpica default to their F1RaceWeekend defaults
+    (country_code="", meeting_key=0, race_date_end="", session date_end="").
+    The scheduler already falls back to start+2h when date_end is absent.
+    """
+
+    def _slot(race_dict: dict, key: str) -> F1SessionSlot | None:
+        sub = race_dict.get(key)
+        if not sub:
+            return None
+        return F1SessionSlot(date=sub.get("date", ""), time=sub.get("time", ""))
+
+    raw = await _jolpica_get(f"/{year}.json", params={"limit": "100"})
+    races_raw: list[dict] = (
+        raw.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+    )
+    weekends: list[F1RaceWeekend] = []
+    for r in races_raw:
+        race_name = r.get("raceName", "")
+        if "Grand Prix" not in race_name:
+            continue
+        circuit = r.get("Circuit", {})
+        location = circuit.get("Location", {})
+        weekends.append(
+            F1RaceWeekend(
+                season=r.get("season", str(year)),
+                round=r.get("round", "0"),
+                race_name=race_name,
+                circuit_id=circuit.get("circuitId", ""),
+                circuit_name=circuit.get("circuitName", ""),
+                locality=location.get("locality", ""),
+                country=location.get("country", ""),
+                country_code="",
+                meeting_key=0,
+                date=r.get("date", ""),
+                time=r.get("time", ""),
+                first_practice=_slot(r, "FirstPractice"),
+                second_practice=_slot(r, "SecondPractice"),
+                third_practice=_slot(r, "ThirdPractice"),
+                qualifying=_slot(r, "Qualifying"),
+                sprint=_slot(r, "Sprint"),
+                sprint_qualifying=_slot(r, "SprintQualifying"),
+            )
+        )
+    return weekends
+
+
 async def get_current_schedule(season: int | str = "current") -> ScheduleResult:
-    """Return all race weekends for a season using OpenF1 meetings + sessions."""
+    """Return all race weekends for a season using OpenF1 meetings + sessions.
+
+    Falls back to Jolpica (Ergast mirror) when OpenF1 is unavailable
+    (e.g. HTTP 401 Unauthorized or timeout).
+    """
     try:
         year = datetime.now(timezone.utc).year if season == "current" else int(season)
-        meetings_raw, sessions_raw = await asyncio.gather(
-            _openf1_get("/meetings", params={"year": year}),
-            _openf1_get("/sessions", params={"year": year}),
-        )
+        meetings_raw: list[dict] = []
+        sessions_raw: list[dict] = []
+        try:
+            meetings_raw, sessions_raw = await asyncio.gather(
+                _openf1_get("/meetings", params={"year": year}),
+                _openf1_get("/sessions", params={"year": year}),
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.warning(
+                f"[F1API] OpenF1 schedule unavailable ({exc}), falling back to Jolpica"
+            )
+
         if not meetings_raw:
-            return Failure(error="empty schedule")
+            # OpenF1 failed or returned empty — fall back to Jolpica
+            weekends = await _get_schedule_from_jolpica(year)
+            if not weekends:
+                return Failure(error="empty schedule")
+            return Success(value=weekends)
 
         # Group sessions by meeting_key
         sessions_by_meeting: dict[int, list[dict]] = {}

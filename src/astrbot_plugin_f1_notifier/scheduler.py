@@ -40,9 +40,12 @@ WEEKEND_START_THRESHOLD = timedelta(hours=24)  # notify 24 h before first sessio
 PRE_RACE_THRESHOLD = timedelta(minutes=30)  # notify 30 min before race
 
 
+MAX_TRACKED_ROUNDS = 5  # keep at most this many rounds in state to bound growth
+
+
 def _default_state() -> dict:
     """Factory function to create a fresh default state dict."""
-    return {"last_notified_round": 0, "notified_events": []}
+    return {"notified_rounds": {}}
 
 
 class F1Scheduler:
@@ -120,6 +123,15 @@ class F1Scheduler:
             await self._star.get_kv_data("f1_state", _default_state())
             or _default_state()
         )
+        # Migrate legacy single-round state to per-round dict format
+        if "notified_rounds" not in self._state:
+            old_round = self._state.pop("last_notified_round", 0)
+            old_events = self._state.pop("notified_events", [])
+            rounds: dict[str, list[str]] = {}
+            if old_round and old_events:
+                rounds[str(old_round)] = list(old_events)
+            self._state["notified_rounds"] = rounds
+            await self._persist_state()
         self._loaded = True
         logger.info(
             f"[F1Notifier] Loaded {len(self._subscribers)} subscriber(s) from KV store."
@@ -134,16 +146,22 @@ class F1Scheduler:
     # ──────────────── helpers ────────────────
 
     def _notified(self, round_num: int, event: str) -> bool:
-        r = self._state.get("last_notified_round", 0)
-        events = self._state.get("notified_events", [])
-        return r == round_num and event in events
+        rounds = self._state.get("notified_rounds", {})
+        events = rounds.get(str(round_num), [])
+        return event in events
 
     async def _mark_notified(self, round_num: int, event: str) -> None:
-        if self._state.get("last_notified_round") != round_num:
-            self._state["last_notified_round"] = round_num
-            self._state["notified_events"] = []
-        if event not in self._state["notified_events"]:
-            self._state["notified_events"].append(event)
+        rounds = self._state.setdefault("notified_rounds", {})
+        key = str(round_num)
+        if key not in rounds:
+            rounds[key] = []
+        if event not in rounds[key]:
+            rounds[key].append(event)
+        # Prune old rounds to prevent unbounded growth
+        if len(rounds) > MAX_TRACKED_ROUNDS:
+            sorted_keys = sorted(rounds, key=int)
+            for old_key in sorted_keys[: len(rounds) - MAX_TRACKED_ROUNDS]:
+                del rounds[old_key]
         await self._persist_state()
 
     async def _broadcast(self, text: str, image_path: str | None = None) -> None:

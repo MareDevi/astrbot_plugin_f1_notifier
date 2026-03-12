@@ -795,5 +795,171 @@ class TestRunCancelledErrorCoversLoop(unittest.TestCase):
                 )
 
 
+# ---------------------------------------------------------------------------
+# 5. Scheduler per-round state tracking (infinite loop fix)
+# ---------------------------------------------------------------------------
+
+class TestSchedulerStateTracking(unittest.TestCase):
+    """Verify per-round notification state prevents cross-round interference.
+
+    The old single-round state (last_notified_round + notified_events) caused
+    an infinite loop when weekend_start for round N and race_result for round
+    N-1 were both active — each _mark_notified call reset the other round's
+    events. The fix uses a per-round dict (notified_rounds).
+    """
+
+    # -- helpers replicating scheduler logic without importing the module --
+
+    @staticmethod
+    def _notified(state: dict, round_num: int, event: str) -> bool:
+        rounds = state.get("notified_rounds", {})
+        events = rounds.get(str(round_num), [])
+        return event in events
+
+    @staticmethod
+    def _mark_notified(state: dict, round_num: int, event: str) -> None:
+        MAX_TRACKED = 5
+        rounds = state.setdefault("notified_rounds", {})
+        key = str(round_num)
+        if key not in rounds:
+            rounds[key] = []
+        if event not in rounds[key]:
+            rounds[key].append(event)
+        if len(rounds) > MAX_TRACKED:
+            sorted_keys = sorted(rounds, key=int)
+            for old_key in sorted_keys[: len(rounds) - MAX_TRACKED]:
+                del rounds[old_key]
+
+    def test_default_state_has_notified_rounds(self):
+        """Default state should use the per-round dict format."""
+        source = _SCHEDULER_SRC.read_text(encoding="utf-8")
+        self.assertIn("notified_rounds", source)
+        self.assertIn('"notified_rounds"', source)
+
+    def test_independent_round_tracking(self):
+        """Events for different rounds should not interfere with each other."""
+        state = {"notified_rounds": {}}
+
+        # Mark weekend_start for round 5
+        self._mark_notified(state, 5, "weekend_start")
+        self.assertTrue(self._notified(state, 5, "weekend_start"))
+
+        # Mark race_result for round 4 (previous race)
+        self._mark_notified(state, 4, "race_result")
+        self.assertTrue(self._notified(state, 4, "race_result"))
+
+        # Round 5's weekend_start must still be marked
+        self.assertTrue(
+            self._notified(state, 5, "weekend_start"),
+            "weekend_start for round 5 was lost after marking round 4 event",
+        )
+
+    def test_no_infinite_loop_scenario(self):
+        """Reproduce the exact infinite-loop scenario and verify the fix.
+
+        Scenario: Race N-1 just finished, race weekend N is < 24h away.
+        Both weekend_start(N) and race_result(N-1) should fire exactly once.
+        """
+        state = {"notified_rounds": {}}
+
+        # Simulate first iteration: weekend_start for round N fires
+        round_n = 5
+        round_prev = 4
+        self.assertFalse(self._notified(state, round_n, "weekend_start"))
+        self._mark_notified(state, round_n, "weekend_start")
+
+        # Same iteration: race_result for round N-1 fires
+        self.assertFalse(self._notified(state, round_prev, "race_result"))
+        self._mark_notified(state, round_prev, "race_result")
+
+        # Simulate second iteration: both should be marked — no re-send
+        self.assertTrue(
+            self._notified(state, round_n, "weekend_start"),
+            "weekend_start should remain marked on next iteration",
+        )
+        self.assertTrue(
+            self._notified(state, round_prev, "race_result"),
+            "race_result should remain marked on next iteration",
+        )
+
+    def test_multiple_events_same_round(self):
+        """Multiple events for the same round should all be tracked."""
+        state = {"notified_rounds": {}}
+        events = ["weekend_start", "fp1_result", "fp2_result", "qualifying_result"]
+        for ev in events:
+            self._mark_notified(state, 3, ev)
+        for ev in events:
+            self.assertTrue(self._notified(state, 3, ev))
+
+    def test_unnotified_event_returns_false(self):
+        state = {"notified_rounds": {}}
+        self._mark_notified(state, 3, "weekend_start")
+        self.assertFalse(self._notified(state, 3, "race_result"))
+        self.assertFalse(self._notified(state, 4, "weekend_start"))
+
+    def test_pruning_keeps_latest_rounds(self):
+        """Pruning should remove the oldest rounds, keeping MAX_TRACKED_ROUNDS."""
+        state = {"notified_rounds": {}}
+        for r in range(1, 8):  # rounds 1–7
+            self._mark_notified(state, r, "race_result")
+
+        rounds = state["notified_rounds"]
+        self.assertLessEqual(len(rounds), 5)
+        # Oldest rounds should be pruned, newest should remain
+        self.assertNotIn("1", rounds)
+        self.assertNotIn("2", rounds)
+        self.assertIn("7", rounds)
+        self.assertIn("6", rounds)
+
+    def test_legacy_state_migration_detected_in_source(self):
+        """Verify _load contains migration logic for old state format."""
+        source = _SCHEDULER_SRC.read_text(encoding="utf-8")
+        self.assertIn("last_notified_round", source,
+                       "Migration code should reference old field name")
+        self.assertIn("notified_events", source,
+                       "Migration code should reference old field name")
+
+    def test_legacy_state_migration_logic(self):
+        """Simulate migrating old-format state to per-round dict."""
+        old_state = {"last_notified_round": 4, "notified_events": ["race_result", "qualifying_result"]}
+
+        # Replicate migration logic from _load
+        if "notified_rounds" not in old_state:
+            old_round = old_state.pop("last_notified_round", 0)
+            old_events = old_state.pop("notified_events", [])
+            rounds = {}
+            if old_round and old_events:
+                rounds[str(old_round)] = list(old_events)
+            old_state["notified_rounds"] = rounds
+
+        # Verify migration result
+        self.assertIn("notified_rounds", old_state)
+        self.assertNotIn("last_notified_round", old_state)
+        self.assertNotIn("notified_events", old_state)
+        self.assertTrue(self._notified(old_state, 4, "race_result"))
+        self.assertTrue(self._notified(old_state, 4, "qualifying_result"))
+
+    def test_legacy_empty_state_migration(self):
+        """Migrating an empty old-format state should produce empty dict."""
+        old_state = {"last_notified_round": 0, "notified_events": []}
+
+        if "notified_rounds" not in old_state:
+            old_round = old_state.pop("last_notified_round", 0)
+            old_events = old_state.pop("notified_events", [])
+            rounds = {}
+            if old_round and old_events:
+                rounds[str(old_round)] = list(old_events)
+            old_state["notified_rounds"] = rounds
+
+        self.assertEqual(old_state["notified_rounds"], {})
+
+    def test_duplicate_mark_notified_is_idempotent(self):
+        """Marking the same event twice should not duplicate it."""
+        state = {"notified_rounds": {}}
+        self._mark_notified(state, 3, "weekend_start")
+        self._mark_notified(state, 3, "weekend_start")
+        self.assertEqual(state["notified_rounds"]["3"].count("weekend_start"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

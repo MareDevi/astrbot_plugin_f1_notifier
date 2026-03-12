@@ -818,7 +818,7 @@ class TestSchedulerStateTracking(unittest.TestCase):
 
     @staticmethod
     def _mark_notified(state: dict, round_num: int, event: str) -> None:
-        MAX_TRACKED = 5
+        MAX_TRACKED = 5  # mirrors MAX_TRACKED_ROUNDS in scheduler.py
         rounds = state.setdefault("notified_rounds", {})
         key = str(round_num)
         if key not in rounds:

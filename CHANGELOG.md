@@ -1,3 +1,16 @@
+## [1.1.3] - 2026-03-12
+
+### 🚀 Features
+
+- Update version to 1.1.2 in CHANGELOG, metadata, and pyproject.toml
+
+### 🐛 Bug Fixes
+
+- Use per-round dict for notification state to prevent infinite loop
+
+### 🧪 Testing
+
+- Add comment documenting magic number relationship to scheduler constant
 ## [1.1.2] - 2026-03-08
 
 ### 🚀 Features

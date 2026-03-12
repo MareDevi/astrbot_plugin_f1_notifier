@@ -157,10 +157,12 @@ class F1Scheduler:
             rounds[key] = []
         if event not in rounds[key]:
             rounds[key].append(event)
-        # Prune old rounds to prevent unbounded growth
+        # Prune old rounds to prevent unbounded growth. Use insertion order so
+        # that newly added rounds (e.g. a new season's round "1") are never
+        # treated as the oldest and immediately removed.
         if len(rounds) > MAX_TRACKED_ROUNDS:
-            sorted_keys = sorted(rounds, key=int)
-            for old_key in sorted_keys[: len(rounds) - MAX_TRACKED_ROUNDS]:
+            num_to_remove = len(rounds) - MAX_TRACKED_ROUNDS
+            for old_key in list(rounds.keys())[:num_to_remove]:
                 del rounds[old_key]
         await self._persist_state()
 

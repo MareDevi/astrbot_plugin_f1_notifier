@@ -433,7 +433,7 @@ class F1Scheduler:
                             f"[F1Notifier] Sent qualifying_result for round {round_num}"
                         )
                     case Failure(error=err):
-                        logger.warning(
+                        logger.debug(
                             f"[F1Notifier] Qualifying result not ready: {err}"
                         )
 
@@ -514,7 +514,7 @@ class F1Scheduler:
                     await self._mark_notified(lf_round, "race_result")
                     logger.info(f"[F1Notifier] Sent race_result for round {lf_round}")
                 case Failure(error=err):
-                    logger.warning(f"[F1Notifier] Race result not ready: {err}")
+                    logger.debug(f"[F1Notifier] Race result not ready: {err}")
 
         if latest_finished.sprint is not None:
             sprint_slot = latest_finished.sprint
@@ -540,6 +540,6 @@ class F1Scheduler:
                                 f"[F1Notifier] Sent sprint_result for round {lf_round}"
                             )
                         case Failure(error=err):
-                            logger.warning(
+                            logger.debug(
                                 f"[F1Notifier] Sprint result not ready: {err}"
                             )

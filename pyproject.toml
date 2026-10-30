@@ -5,27 +5,33 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "astrbot-plugin-f1-notifier"
 version = "1.1.4"
-description = "F1赛事推送与查询 AstrBot 插件"
-authors = [{name = "MareDevi"}]
+description = "Reliable F1 race notifications and queries for AstrBot"
+authors = [{ name = "MareDevi" }]
 readme = "README.md"
-license = {text = "AGPL-3.0"}
+license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.10"
 dependencies = [
-    "aiohttp",
-    "pydantic>=2",
-    "cairosvg>=2.8.2",
-    "pillow>=12.1.1",
+  "aiohttp>=3.9,<4",
+  "pillow>=10,<13",
+  "cairosvg>=2.7,<3",
+  "tzdata>=2025.1",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=9.0.2",
-    "pytest-asyncio",
-]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "ruff>=0.15,<1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "ASYNC"]
+ignore = ["E501", "ASYNC230", "ASYNC240"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

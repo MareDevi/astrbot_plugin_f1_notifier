@@ -1,4 +1,4 @@
-aiohttp
-cairosvg
-pillow
-pydantic
+aiohttp>=3.9,<4
+pillow>=10,<13
+cairosvg>=2.7,<3
+tzdata>=2025.1

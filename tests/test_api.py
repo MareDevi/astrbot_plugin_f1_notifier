@@ -246,8 +246,8 @@ async def test_openf1_null_qualifying_arrays_are_renderable(client, monkeypatch)
 
     monkeypatch.setattr(client, "_get", payload)
     result = await client.results(race, "sprint_qualifying")
-    assert result.rows[0][-1] == "1:28.500"
-    assert result.rows[1][-1] == "DSQ"
+    assert result.rows[0][result.columns.index("圈速 / 状态")] == "1:28.500"
+    assert result.rows[1][result.columns.index("圈速 / 状态")] == "DSQ"
 
 
 async def test_provider_500_is_not_cached(client, server):
@@ -370,3 +370,91 @@ async def test_cancelled_session_does_not_hide_active_replacement(
         table = await client.results(race, "practice1")
         assert table is not None
         assert table.rows[0][1] == "Lando Norris"
+
+
+@pytest.mark.parametrize(
+    "kind,field", [("race", "Results"), ("sprint", "SprintResults")]
+)
+async def test_race_and_sprint_preserve_completed_laps(client, server, kind, field):
+    _, state = server
+    race = Race(
+        2026,
+        2,
+        "China",
+        "",
+        "",
+        "",
+        (Session("race", datetime(2026, 3, 15, 7, tzinfo=timezone.utc)),),
+    )
+    state["payload"] = {
+        "MRData": {
+            "RaceTable": {
+                "Races": [
+                    {
+                        "season": "2026",
+                        "round": "2",
+                        field: [
+                            {
+                                "position": "1",
+                                "laps": "57",
+                                "points": "25",
+                                "Driver": {
+                                    "givenName": "Lando",
+                                    "familyName": "Norris",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+    table = await client.results(race, kind)
+    assert "圈数" in table.columns
+    assert table.rows[0][table.columns.index("圈数")] == "57"
+
+
+@pytest.mark.parametrize(
+    "gap,expected", [(0.450, "+0.450"), (0, "领跑"), ("+1 LAP", "+1 LAP"), (None, "—")]
+)
+async def test_practice_preserves_gap_to_leader(client, monkeypatch, gap, expected):
+    race = Race(
+        2026,
+        2,
+        "China",
+        "",
+        "",
+        "",
+        (
+            Session("practice1", datetime(2026, 3, 13, 7, tzinfo=timezone.utc)),
+            Session("race", datetime(2026, 3, 15, 7, tzinfo=timezone.utc)),
+        ),
+    )
+
+    async def payload(base, path, params=None, ttl=30):
+        if path == "/sessions":
+            return [
+                {
+                    "session_key": 2,
+                    "session_name": "Practice 1",
+                    "date_start": "2026-03-13T07:00:00Z",
+                }
+            ]
+        if path == "/session_result":
+            return [
+                {
+                    "driver_number": 4,
+                    "position": 1,
+                    "duration": 90.123,
+                    "gap_to_leader": gap,
+                    "number_of_laps": 24,
+                }
+            ]
+        return [{"driver_number": 4, "full_name": "Lando Norris"}]
+
+    monkeypatch.setattr(client, "_get", payload)
+    table = await client.results(race, "practice1")
+    assert "差距" in table.columns
+    assert table.rows[0][table.columns.index("差距")] == expected
+    assert "圈数" in table.columns
+    assert table.rows[0][table.columns.index("圈数")] == "24"

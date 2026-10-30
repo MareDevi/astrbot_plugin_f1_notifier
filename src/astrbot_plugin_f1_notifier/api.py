@@ -329,11 +329,19 @@ class F1Client:
                     detail = (
                         (row.get("Time") or {}).get("time") or row.get("status") or "—"
                     )
-                    output.append(prefix + (str(detail), str(row.get("points") or "0")))
+                    laps = row.get("laps")
+                    output.append(
+                        prefix
+                        + (
+                            str(laps) if laps is not None else "—",
+                            str(detail),
+                            str(row.get("points") or "0"),
+                        )
+                    )
             columns = (
                 ("名次", "车手", "车队", "Q1", "Q2", "Q3")
                 if kind == "qualifying"
-                else ("名次", "车手", "车队", "用时 / 状态", "积分")
+                else ("名次", "车手", "车队", "圈数", "用时 / 状态", "积分")
             )
             return Table(
                 f"{SESSION_NAMES[kind]}结果",
@@ -403,19 +411,28 @@ class F1Client:
                 if row.get(flag):
                     detail = flag.upper()
                     break
-            output.append(
-                (
-                    str(row.get("position") or "—"),
-                    str(name),
-                    str(driver.get("team_name") or "—"),
-                    detail,
-                )
+            values = (
+                str(row.get("position") or "—"),
+                str(name),
+                str(driver.get("team_name") or "—"),
+                detail,
             )
+            if kind != "grid":
+                gap = row.get("gap_to_leader")
+                if isinstance(gap, list):
+                    gap = next((v for v in reversed(gap) if v is not None), None)
+                gap_text = str(gap) if isinstance(gap, str) and gap else "—"
+                if isinstance(gap, (int, float)) and math.isfinite(gap):
+                    gap_text = "领跑" if gap == 0 else f"{gap:+.3f}"
+                laps = row.get("number_of_laps")
+                values += (gap_text, str(laps) if laps is not None else "—")
+            output.append(values)
         title = "正赛发车顺序" if kind == "grid" else f"{SESSION_NAMES[kind]}结果"
         return Table(
             title,
             f"{race.season} 第 {race.round} 站 · {race.name}",
-            ("名次", "车手", "车队", "圈速 / 状态"),
+            ("名次", "车手", "车队", "圈速 / 状态")
+            + (() if kind == "grid" else ("差距", "圈数")),
             tuple(output),
             "数据来源：OpenF1 · 数据可能延迟发布",
             race.circuit_id,

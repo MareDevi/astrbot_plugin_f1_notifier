@@ -1,899 +1,477 @@
-"""F1 API client module.
-
-Wraps:
-  - Jolpica-F1 (Ergast mirror): https://api.jolpi.ca/ergast/f1/
-  - OpenF1: https://api.openf1.org/v1/
-
-All public functions return ``ApiResult[T]`` — either ``Success(value=...)``
-or ``Failure(error=...)``.  Callers use ``match`` / ``case`` to branch:
-
-    result = await get_race_result()
-    match result:
-        case Success(value=race):  ...
-        case Failure(error=err):   ...
-"""
+"""Asynchronous F1 clients with bounded caches and source-specific pacing."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 import time
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from collections import OrderedDict
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any
 
 import aiohttp
 
-from .models import (
-    F1QualifyingResult,
-    F1RaceResult,
-    F1RaceWeekend,
-    F1SessionSlot,
-    F1SprintResult,
-    Failure,
-    JolpicaConstructorStanding,
-    JolpicaDriverStanding,
-    OpenF1Driver,
-    OpenF1Meeting,
-    OpenF1Position,
-    OpenF1Session,
-    OpenF1SessionResult,
-    Success,
-)
+from .models import SESSION_NAMES, Race, Session, Table, parse_datetime
 
-if TYPE_CHECKING:
-    from .models import (
-        ConstructorStandingsResult,
-        DriversResult,
-        GridResult,
-        MeetingResult,
-        RaceResult,
-        ScheduleResult,
-        SessionResult,
-        SessionResultsResult,
-        StandingsResult,
-    )
+logger = logging.getLogger(__name__)
 
-JOLPICA_BASE = "https://api.jolpi.ca/ergast/f1"
-OPENF1_BASE = "https://api.openf1.org/v1"
-
-_SESSION_LOCK: asyncio.Lock | None = None
-_SESSION_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
-_CLIENT_SESSION: aiohttp.ClientSession | None = None
-
-# In-memory cache: {cache_key: (expiry_timestamp, data)}
-_API_CACHE: dict[str, tuple[float, Any]] = {}
-
-
-def _get_cache_key(base: str, path: str, params: dict[str, Any] | None = None) -> str:
-    """Generate a stable cache key string for a given request."""
-    if not params:
-        return f"{base}{path}"
-    # Sort parameters to ensure consistent key for identical requests
-    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-    return f"{base}{path}?{query}"
-
-
-def _ensure_lock() -> asyncio.Lock:
-    """Return the session lock, recreating it when the event loop has changed."""
-    global _SESSION_LOCK, _SESSION_LOCK_LOOP
-    running_loop = asyncio.get_running_loop()
-    if _SESSION_LOCK is None or _SESSION_LOCK_LOOP is not running_loop:
-        _SESSION_LOCK = asyncio.Lock()
-        _SESSION_LOCK_LOOP = running_loop
-    return _SESSION_LOCK
-
-
-async def _get_session() -> aiohttp.ClientSession:
-    global _CLIENT_SESSION
-    lock = _ensure_lock()
-    async with lock:
-        if _CLIENT_SESSION is None or _CLIENT_SESSION.closed:
-            _CLIENT_SESSION = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15),
-                headers={"Accept": "application/json"},
-            )
-    return _CLIENT_SESSION
-
-
-async def close_session() -> None:
-    global _CLIENT_SESSION
-    lock = _ensure_lock()
-    async with lock:
-        if _CLIENT_SESSION and not _CLIENT_SESSION.closed:
-            await _CLIENT_SESSION.close()
-            _CLIENT_SESSION = None
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Low-level HTTP helpers (return raw data — no model parsing here)
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-async def _jolpica_get(path: str) -> dict[str, Any]:
-    cache_key = _get_cache_key(JOLPICA_BASE, path)
-    now = time.time()
-    if cache_key in _API_CACHE:
-        expiry, value = _API_CACHE[cache_key]
-        if now < expiry:
-            return value
-
-    session = await _get_session()
-    url = f"{JOLPICA_BASE}{path}"
-    async with session.get(url) as resp:
-        if resp.status == 429:
-            # Simple back-off on rate limit
-            await asyncio.sleep(5)
-        resp.raise_for_status()
-        data = await resp.json(content_type=None)
-        # Cache Jolpica for 1 hour by default
-        _API_CACHE[cache_key] = (now + 3600, data)
-        return data
-
-
-async def _openf1_get(
-    path: str, params: dict[str, Any] | None = None
-) -> list[dict[str, Any]]:
-    cache_key = _get_cache_key(OPENF1_BASE, path, params)
-    now = time.time()
-    if cache_key in _API_CACHE:
-        expiry, value = _API_CACHE[cache_key]
-        if now < expiry:
-            return value
-
-    # Determine TTL based on request specifics
-    ttl = 60  # Default 1 minute
-    p = params or {}
-    if "meeting_key" in p or "session_key" in p:
-        if path == "/session_result":
-            # Session results change during session; cache short
-            ttl = 300  # 5 minutes
-        else:
-            # Drivers, meetings, etc. are largely static once created
-            ttl = 86400  # 24 hours
-    elif "year" in p and path in ("/meetings", "/sessions"):
-        # Full year schedule data doesn't change every minute
-        ttl = 3600  # 1 hour
-
-    session = await _get_session()
-    url = f"{OPENF1_BASE}{path}"
-    async with session.get(url, params=params) as resp:
-        if resp.status == 429:
-            # Simple back-off on rate limit
-            await asyncio.sleep(5)
-        resp.raise_for_status()
-        data = await resp.json(content_type=None)
-        _API_CACHE[cache_key] = (now + ttl, data)
-        return data
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Datetime helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def _parse_iso_datetime(s: str) -> datetime | None:
-    """Parse ISO 8601 string → timezone-aware UTC datetime, or None."""
-    try:
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError, AttributeError):
-        return None
-
-
-def _split_iso_dt(ds: str) -> tuple[str, str]:
-    """Split an ISO 8601 datetime into ('YYYY-MM-DD', 'HH:MM:SSZ').
-
-    Normalises to UTC so downstream code can stay simple.
-    """
-    dt = _parse_iso_datetime(ds)
-    if dt is None:
-        return ds[:10], ""
-    utc = dt.astimezone(timezone.utc)
-    return utc.strftime("%Y-%m-%d"), utc.strftime("%H:%M:%SZ")
-
-
-async def _empty_list() -> list:
-    return []
-
-
-def _secs_to_laptime(secs: float | None) -> str:
-    """Convert seconds → '1:23.456' qualifying lap-time string, or '—'."""
-    if not secs:
-        return "—"
-    m = int(secs) // 60
-    s = secs - m * 60
-    return f"{m}:{s:06.3f}"
-
-
-def _secs_to_racetime(secs: float | None) -> str:
-    """Convert seconds → '1:23:45.678' (or '23:45.678') race-time string."""
-    if not secs:
-        return "-"
-    h = int(secs) // 3600
-    m = (int(secs) % 3600) // 60
-    s = secs % 60
-    if h > 0:
-        return f"{h}:{m:02d}:{s:06.3f}"
-    return f"{m}:{s:06.3f}"
-
-
-# Maps OpenF1 circuit_short_name → Jolpica circuit_id (for image lookup)
-_OPENF1_CIRCUIT_MAP: dict[str, str] = {
-    "Albert Park": "albert_park",
-    "Melbourne": "albert_park",
-    "Shanghai": "shanghai",
-    "Suzuka": "suzuka",
-    "Sakhir": "bahrain",
-    "Bahrain": "bahrain",
-    "Jeddah": "jeddah",
-    "Miami": "miami",
-    "Imola": "imola",
-    "Monaco": "monaco",
-    "Catalunya": "catalunya",
-    "Barcelona": "catalunya",
-    "Gilles Villeneuve": "villeneuve",
-    "Montreal": "villeneuve",
-    "Red Bull Ring": "red_bull_ring",
-    "Spielberg": "red_bull_ring",
-    "Silverstone": "silverstone",
-    "Spa-Francorchamps": "spa",
-    "Hungaroring": "hungaroring",
-    "Budapest": "hungaroring",
-    "Zandvoort": "zandvoort",
-    "Monza": "monza",
-    "Baku": "baku",
-    "Singapore": "marina_bay",
-    "Marina Bay": "marina_bay",
-    "Austin": "americas",
-    "COTA": "americas",
-    "Mexico City": "rodriguez",
-    "Interlagos": "interlagos",
-    "São Paulo": "interlagos",
-    "Las Vegas": "vegas",
-    "Lusail": "losail",
-    "Yas Marina": "yas_marina",
-    "Portimão": "portimao",
-    "Istanbul": "istanbul",
-    "Mugello": "mugello",
-    "Sochi": "sochi",
-    "Nürburgring": "nurburgring",
+OPENF1_NAMES = {
+    "practice1": "Practice 1",
+    "practice2": "Practice 2",
+    "practice3": "Practice 3",
+    "sprint_qualifying": "Sprint Qualifying",
+    "qualifying": "Qualifying",
+    "sprint": "Sprint",
+    "race": "Race",
 }
 
 
-async def _get_openf1_round(
-    session_name: str, round_number: int | str, year: int
-) -> tuple[dict, int]:
-    """Return (session_dict, 0-based_round_index) for the matching session.
+class DataError(Exception):
+    """A data provider is temporarily unavailable or returned invalid data."""
 
-    Finds all past sessions of *session_name* in *year*, sorts them by
-    date_start, and returns the one at *round_number* (1-based) or the
-    most recent when *round_number* == 'last'.
 
-    Raises ValueError when no suitable session is found.
+class F1Client:
+    """Own the HTTP session, cache, and request budget for one plugin instance.
+
+    Args:
+        jolpica_base: Jolpica API root.
+        openf1_base: OpenF1 API root.
     """
-    sessions_raw = await _openf1_get(
-        "/sessions", params={"session_name": session_name, "year": year}
-    )
-    now = datetime.now(timezone.utc)
-    past = [
-        r
-        for r in sessions_raw
-        if (dt := _parse_iso_datetime(r.get("date_start", ""))) is not None
-        and dt <= now
-    ]
-    if not past:
-        raise ValueError(f"no past {session_name!r} sessions for {year}")
-    past.sort(
-        key=lambda r: _parse_iso_datetime(r.get("date_start", ""))
-        or datetime.min.replace(tzinfo=timezone.utc)
-    )
-    if round_number == "last":
-        return past[-1], len(past) - 1
-    idx = int(round_number) - 1
-    if 0 <= idx < len(past):
-        return past[idx], idx
-    raise ValueError(f"round {round_number} not found in {session_name!r} for {year}")
 
+    def __init__(
+        self,
+        jolpica_base: str = "https://api.jolpi.ca/ergast/f1",
+        openf1_base: str = "https://api.openf1.org/v1",
+    ) -> None:
+        self.jolpica_base = jolpica_base
+        self.openf1_base = openf1_base
+        self._session: aiohttp.ClientSession | None = None
+        self._cache: OrderedDict[tuple, tuple[float, Any]] = OrderedDict()
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._next_request: dict[str, float] = {}
+        self._retry_at: dict[str, float] = {}
 
-async def _qualifying_from_openf1(
-    round_number: int | str, year: int
-) -> "RaceResult":
-    """Fetch qualifying result from OpenF1."""
-    chosen, chosen_idx = await _get_openf1_round("Qualifying", round_number, year)
-    session_key = chosen["session_key"]
-
-    meeting_key = chosen.get("meeting_key")
-    results_raw, drivers_raw, meetings_raw = await asyncio.gather(
-        _openf1_get("/session_result", params={"session_key": session_key}),
-        _openf1_get("/drivers", params={"session_key": session_key}),
-        _openf1_get("/meetings", params={"meeting_key": meeting_key})
-        if meeting_key
-        else _empty_list(),
-    )
-    if not results_raw or not drivers_raw:
-        raise ValueError("empty session_result or drivers from OpenF1")
-
-    drivers_map: dict[int, dict] = {d["driver_number"]: d for d in drivers_raw}
-    meeting: dict = meetings_raw[0] if meetings_raw else {}
-
-    qual_results: list[F1QualifyingResult] = []
-    for entry in sorted(results_raw, key=lambda x: x.get("position") or 99):
-        driver_num = entry.get("driver_number")
-        d = drivers_map.get(driver_num, {})
-
-        duration = entry.get("duration")
-        if isinstance(duration, list):
-            q1_s = duration[0] if len(duration) > 0 else None
-            q2_s = duration[1] if len(duration) > 1 else None
-            q3_s = duration[2] if len(duration) > 2 else None
-        else:
-            q1_s, q2_s, q3_s = None, None, None
-
-        first_name = d.get("first_name") or ""
-        last_name = d.get("last_name") or f"#{driver_num}"
-        qual_results.append(
-            F1QualifyingResult(
-                position=entry.get("position"),
-                driver_name=f"{first_name} {last_name}".strip(),
-                driver_first_name=first_name,
-                driver_last_name=last_name,
-                team_name=d.get("team_name") or "?",
-                headshot_url=d.get("headshot_url") or None,
-                q1=_secs_to_laptime(q1_s),
-                q2=_secs_to_laptime(q2_s),
-                q3=_secs_to_laptime(q3_s),
+    async def open(self) -> None:
+        """Open one reusable connection pool during plugin initialization."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=20),
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "AstrBot-F1-Notifier/2.0",
+                },
             )
+
+    async def close(self) -> None:
+        """Release connections and discard instance-owned response data."""
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+        self._cache.clear()
+
+    async def _get(
+        self, base: str, path: str, params: dict | None = None, ttl: float = 30
+    ) -> Any:
+        """Fetch JSON with cache coalescing and a per-provider request budget.
+
+        Args:
+            base: Provider API root.
+            path: Endpoint relative to the root.
+            params: Query parameters, included in the cache identity.
+            ttl: Maximum successful-response cache lifetime in seconds.
+
+        Returns:
+            Decoded JSON object or list.
+
+        Raises:
+            DataError: On rate limiting, HTTP errors, or invalid JSON.
+        """
+        key = (base, path, tuple(sorted((params or {}).items())))
+        async with self._locks.setdefault(base, asyncio.Lock()):
+            now = time.monotonic()
+            cached = self._cache.get(key)
+            if cached and cached[0] > now:
+                self._cache.move_to_end(key)
+                return cached[1]
+            if self._retry_at.get(base, 0) > now:
+                raise DataError("数据源限流，请稍后重试。")
+            await asyncio.sleep(max(0, self._next_request.get(base, 0) - now))
+            if self._session is None or self._session.closed:
+                raise DataError("数据客户端尚未就绪，请稍后重试。")
+            # OpenF1's public tier permits 30 requests/minute. Pace all callers,
+            # including interactive commands, rather than only the scheduler.
+            interval = 2.1 if base == self.openf1_base else 0.6
+            self._next_request[base] = time.monotonic() + interval
+            try:
+                async with self._session.get(
+                    f"{base}{path}", params=params
+                ) as response:
+                    if response.status == 404 and base == self.openf1_base:
+                        return []
+                    if response.status == 429:
+                        retry = response.headers.get("Retry-After", "60")
+                        try:
+                            delay = float(retry)
+                        except ValueError:
+                            try:
+                                delay = (
+                                    parsedate_to_datetime(retry)
+                                    - datetime.now(timezone.utc)
+                                ).total_seconds()
+                            except (ValueError, TypeError, OverflowError):
+                                delay = 60
+                        if not math.isfinite(delay):
+                            delay = 60
+                        self._retry_at[base] = time.monotonic() + max(1, delay)
+                        raise DataError("数据源限流，请稍后重试。")
+                    response.raise_for_status()
+                    data = await response.json()
+                    if not isinstance(data, (dict, list)):
+                        raise DataError("数据源返回了无效内容，请稍后重试。")
+            except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+                raise DataError("数据源暂时不可用，请稍后重试。") from exc
+            if data and ttl > 0:
+                self._cache[key] = (time.monotonic() + ttl, data)
+                self._cache.move_to_end(key)
+                while len(self._cache) > 128:
+                    self._cache.popitem(last=False)
+            return data
+
+    async def schedule(self, season: int) -> list[Race]:
+        """Fetch complete known weekends for an explicit season.
+
+        Args:
+            season: Championship year.
+
+        Returns:
+            Weekends sorted chronologically; unknown race times are omitted.
+
+        Raises:
+            DataError: If the provider fails or the response has no race table.
+        """
+        data = await self._get(
+            self.jolpica_base, f"/{season}.json", {"limit": 100}, ttl=1800
         )
-
-    circuit_short = chosen.get("circuit_short_name") or ""
-    return Success(
-        value=F1RaceWeekend(
-            season=str(year),
-            round=str(chosen_idx + 1),
-            race_name=meeting.get("meeting_name") or chosen.get("location") or "?",
-            circuit_id=_OPENF1_CIRCUIT_MAP.get(circuit_short, ""),
-            circuit_name=circuit_short,
-            locality=chosen.get("location") or "",
-            country=chosen.get("country_name") or "",
-            meeting_key=chosen.get("meeting_key") or 0,
-            date=chosen.get("date_start", "")[:10],
-            qualifying_results=qual_results,
-        )
-    )
-
-
-async def _race_from_openf1(
-    round_number: int | str, year: int
-) -> "RaceResult":
-    """Fetch race result from OpenF1."""
-    chosen, chosen_idx = await _get_openf1_round("Race", round_number, year)
-    session_key = chosen["session_key"]
-
-    meeting_key = chosen.get("meeting_key")
-    results_raw, drivers_raw, meetings_raw = await asyncio.gather(
-        _openf1_get("/session_result", params={"session_key": session_key}),
-        _openf1_get("/drivers", params={"session_key": session_key}),
-        _openf1_get("/meetings", params={"meeting_key": meeting_key})
-        if meeting_key
-        else _empty_list(),
-    )
-    if not results_raw or not drivers_raw:
-        raise ValueError("empty session_result or drivers from OpenF1")
-
-    drivers_map: dict[int, dict] = {d["driver_number"]: d for d in drivers_raw}
-    meeting: dict = meetings_raw[0] if meetings_raw else {}
-
-    results_sorted = sorted(results_raw, key=lambda x: x.get("position") or 99)
-    leader_duration = results_sorted[0].get("duration") if results_sorted else None
-
-    race_results: list[F1RaceResult] = []
-    for entry in results_sorted:
-        driver_num = entry.get("driver_number")
-        d = drivers_map.get(driver_num, {})
-        pos = entry.get("position")
-
-        if entry.get("dns"):
-            status, time_val = "DNS", None
-        elif entry.get("dsq"):
-            status, time_val = "DSQ", None
-        elif entry.get("dnf"):
-            status, time_val = "DNF", None
-        else:
-            status = "Finished"
-            gap = entry.get("gap_to_leader")
-            if pos == 1:
-                time_val = _secs_to_racetime(leader_duration)
-            elif isinstance(gap, str):
-                time_val = gap
-            elif isinstance(gap, (int, float)) and gap > 0:
-                time_val = f"+{gap:.3f}"
-            else:
-                time_val = "-"
-
-        race_pts = int(entry.get("points") or 0)
-        first_name = d.get("first_name") or ""
-        last_name = d.get("last_name") or f"#{driver_num}"
-
-        race_results.append(
-            F1RaceResult(
-                position=pos,
-                driver_name=f"{first_name} {last_name}".strip(),
-                driver_first_name=first_name,
-                driver_last_name=last_name,
-                team_name=d.get("team_name") or "?",
-                headshot_url=d.get("headshot_url") or None,
-                laps=str(entry.get("number_of_laps") or ""),
-                status=status,
-                time=time_val,
-                points=str(race_pts),
-            )
-        )
-
-    circuit_short = chosen.get("circuit_short_name") or ""
-    return Success(
-        value=F1RaceWeekend(
-            season=str(year),
-            round=str(chosen_idx + 1),
-            race_name=meeting.get("meeting_name") or chosen.get("location") or "?",
-            circuit_id=_OPENF1_CIRCUIT_MAP.get(circuit_short, ""),
-            circuit_name=circuit_short,
-            locality=chosen.get("location") or "",
-            country=chosen.get("country_name") or "",
-            meeting_key=chosen.get("meeting_key") or 0,
-            date=chosen.get("date_start", "")[:10],
-            race_results=race_results,
-        )
-    )
-
-
-async def _sprint_from_openf1(
-    round_number: int | str, year: int
-) -> "RaceResult":
-    """Fetch sprint race result from OpenF1."""
-    chosen, chosen_idx = await _get_openf1_round("Sprint", round_number, year)
-    session_key = chosen["session_key"]
-
-    meeting_key = chosen.get("meeting_key")
-    results_raw, drivers_raw, meetings_raw = await asyncio.gather(
-        _openf1_get("/session_result", params={"session_key": session_key}),
-        _openf1_get("/drivers", params={"session_key": session_key}),
-        _openf1_get("/meetings", params={"meeting_key": meeting_key})
-        if meeting_key
-        else _empty_list(),
-    )
-    if not results_raw or not drivers_raw:
-        raise ValueError("empty session_result or drivers from OpenF1")
-
-    drivers_map: dict[int, dict] = {d["driver_number"]: d for d in drivers_raw}
-    meeting: dict = meetings_raw[0] if meetings_raw else {}
-
-    results_sorted = sorted(results_raw, key=lambda x: x.get("position") or 99)
-    leader_duration = results_sorted[0].get("duration") if results_sorted else None
-
-    sprint_results: list[F1SprintResult] = []
-    for entry in results_sorted:
-        driver_num = entry.get("driver_number")
-        d = drivers_map.get(driver_num, {})
-        pos = entry.get("position")
-
-        if entry.get("dns"):
-            status, time_val = "DNS", None
-        elif entry.get("dsq"):
-            status, time_val = "DSQ", None
-        elif entry.get("dnf"):
-            status, time_val = "DNF", None
-        else:
-            status = "Finished"
-            gap = entry.get("gap_to_leader")
-            if pos == 1:
-                time_val = _secs_to_racetime(leader_duration)
-            elif isinstance(gap, str):
-                time_val = gap
-            elif isinstance(gap, (int, float)) and gap > 0:
-                time_val = f"+{gap:.3f}"
-            else:
-                time_val = "-"
-
-        first_name = d.get("first_name") or ""
-        last_name = d.get("last_name") or f"#{driver_num}"
-
-        sprint_results.append(
-            F1SprintResult(
-                position=pos,
-                driver_name=f"{first_name} {last_name}".strip(),
-                driver_first_name=first_name,
-                driver_last_name=last_name,
-                team_name=d.get("team_name") or "?",
-                headshot_url=d.get("headshot_url") or None,
-                laps=str(entry.get("number_of_laps") or ""),
-                status=status,
-                time=time_val,
-                points=str(int(entry.get("points") or 0)),
-            )
-        )
-
-    circuit_short = chosen.get("circuit_short_name") or ""
-    return Success(
-        value=F1RaceWeekend(
-            season=str(year),
-            round=str(chosen_idx + 1),
-            race_name=meeting.get("meeting_name") or chosen.get("location") or "?",
-            circuit_id=_OPENF1_CIRCUIT_MAP.get(circuit_short, ""),
-            circuit_name=circuit_short,
-            locality=chosen.get("location") or "",
-            country=chosen.get("country_name") or "",
-            meeting_key=chosen.get("meeting_key") or 0,
-            date=chosen.get("date_start", "")[:10],
-            sprint_results=sprint_results,
-        )
-    )
-
-
-async def get_current_schedule(season: int | str = "current") -> ScheduleResult:
-    """Return all race weekends for a season using OpenF1 meetings + sessions."""
-    try:
-        year = datetime.now(timezone.utc).year if season == "current" else int(season)
-        meetings_raw, sessions_raw = await asyncio.gather(
-            _openf1_get("/meetings", params={"year": year}),
-            _openf1_get("/sessions", params={"year": year}),
-        )
-        if not meetings_raw:
-            return Failure(error="empty schedule")
-
-        # Group sessions by meeting_key
-        sessions_by_meeting: dict[int, list[dict]] = {}
-        for s in sessions_raw:
-            mk = s.get("meeting_key")
-            if mk:
-                sessions_by_meeting.setdefault(mk, []).append(s)
-
-        _SESSION_FIELD_MAP = {
-            "Practice 1": "first_practice",
-            "Practice 2": "second_practice",
-            "Practice 3": "third_practice",
-            "Qualifying": "qualifying",
-            "Sprint": "sprint",
-            "Sprint Qualifying": "sprint_qualifying",
-            "Sprint Shootout": "sprint_qualifying",
-        }
-
-        weekends: list[F1RaceWeekend] = []
-        sorted_meetings = sorted(
-            meetings_raw, key=lambda x: x.get("date_start", "")
-        )
-        # Filter out non-race meetings (e.g. Pre-Season Testing)
-        sorted_meetings = [
-            m for m in sorted_meetings
-            if "Grand Prix" in (m.get("meeting_name") or "")
-        ]
-        for idx, m in enumerate(sorted_meetings, start=1):
-            mk = m.get("meeting_key")
-            circuit_short = m.get("circuit_short_name") or ""
-
-            kwargs: dict[str, Any] = {
-                "season": str(year),
-                "round": str(idx),
-                "race_name": m.get("meeting_name") or "",
-                "circuit_id": _OPENF1_CIRCUIT_MAP.get(circuit_short, ""),
-                "circuit_name": circuit_short,
-                "locality": m.get("location") or "",
-                "country": m.get("country_name") or "",
-                "country_code": m.get("country_code") or "",
-                "meeting_key": mk or 0,
-            }
-
-            for s in sessions_by_meeting.get(mk, []):
-                sn = s.get("session_name", "")
-                date_part, time_part = _split_iso_dt(s.get("date_start") or "")
-                date_end_raw = s.get("date_end") or ""
-
-                field = _SESSION_FIELD_MAP.get(sn)
-                if field:
-                    kwargs[field] = F1SessionSlot(
-                        date=date_part, time=time_part, date_end=date_end_raw
+        try:
+            rows = data["MRData"]["RaceTable"]["Races"]
+            races = []
+            for raw in rows:
+                try:
+                    race = Race.from_jolpica(raw)
+                    if race.season == season:
+                        races.append(race)
+                except (KeyError, ValueError, TypeError):
+                    logger.warning(
+                        "Skipping race with incomplete schedule: %s", raw.get("round")
                     )
-                elif sn == "Race":
-                    kwargs["date"] = date_part
-                    kwargs["time"] = time_part
-                    kwargs["race_date_end"] = date_end_raw
-
-            weekends.append(F1RaceWeekend(**kwargs))
-
-        if not weekends:
-            return Failure(error="empty schedule")
-        return Success(value=weekends)
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
-
-
-async def get_race_result(
-    round_number: int | str = "last", season: int | str = "current"
-) -> RaceResult:
-    """Return race result from OpenF1."""
-    year = datetime.now(timezone.utc).year if season == "current" else int(season)
-    try:
-        return await _race_from_openf1(round_number, year)
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
-
-
-async def get_qualifying_result(
-    round_number: int | str = "last", season: int | str = "current"
-) -> RaceResult:
-    """Return qualifying result from OpenF1."""
-    year = datetime.now(timezone.utc).year if season == "current" else int(season)
-    try:
-        return await _qualifying_from_openf1(round_number, year)
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
-
-
-async def get_sprint_result(
-    round_number: int | str, season: int | str = "current"
-) -> RaceResult:
-    """Return sprint race result from OpenF1."""
-    year = datetime.now(timezone.utc).year if season == "current" else int(season)
-    try:
-        return await _sprint_from_openf1(round_number, year)
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
-
-
-async def get_driver_standings(season: int | str = "current") -> StandingsResult:
-    """Return driver championship standings for a season."""
-    try:
-        raw = await _jolpica_get(f"/{season}/driverStandings.json")
-        tables: list[dict] = raw["MRData"]["StandingsTable"]["StandingsLists"]
-        match tables:
-            case [first, *_]:
-                standings = [
-                    JolpicaDriverStanding.model_validate(e)
-                    for e in first["DriverStandings"]
-                ]
-                return Success(value=standings)
-            case _:
-                return Failure(error="no standings data")
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
-
-
-async def get_constructor_standings(
-    season: int | str = "current",
-) -> ConstructorStandingsResult:
-    """Return constructor championship standings for a season."""
-    try:
-        raw = await _jolpica_get(f"/{season}/constructorStandings.json")
-        tables: list[dict] = raw["MRData"]["StandingsTable"]["StandingsLists"]
-        match tables:
-            case [first, *_]:
-                standings = [
-                    JolpicaConstructorStanding.model_validate(e)
-                    for e in first["ConstructorStandings"]
-                ]
-                return Success(value=standings)
-            case _:
-                return Failure(error="no constructor standings data")
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# OpenF1 public API
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-async def get_latest_session(session_name: str = "Race") -> SessionResult:
-    """Return the most recently *started* OpenF1 session with given name.
-
-    Filters out sessions that haven't started yet so we never return a future
-    session_key (e.g. Abu Dhabi when the current race is Australia).
-    """
-    try:
-        year = datetime.now(timezone.utc).year
-        results = await _openf1_get(
-            "/sessions",
-            params={"session_name": session_name, "year": year},
-        )
-        now = datetime.now(timezone.utc)
-        past = [
-            r
-            for r in results
-            if (dt := _parse_iso_datetime(r.get("date_start", ""))) is not None
-            and dt <= now
-        ]
-        match past:
-            case []:
-                return Failure(error="no past sessions found")
-            case past_list:
-                past_list.sort(
-                    key=lambda r: (
-                        _parse_iso_datetime(r.get("date_start", ""))
-                        or datetime.min.replace(tzinfo=timezone.utc)
-                    )
+        except (KeyError, TypeError) as exc:
+            raise DataError("赛程数据格式异常，请稍后重试。") from exc
+        # Jolpica supplies official round identities. OpenF1 can supply more
+        # precise starts and ends without guessing rounds from meeting order.
+        if season >= 2023 and races:
+            try:
+                timings = await self._get(
+                    self.openf1_base, "/sessions", {"year": season}, ttl=300
                 )
-                return Success(value=OpenF1Session.model_validate(past_list[-1]))
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
-
-
-# Maps user-friendly fp_number → OpenF1 session_name
-FP_SESSION_NAMES = {
-    "1": "Practice 1",
-    "fp1": "Practice 1",
-    "2": "Practice 2",
-    "fp2": "Practice 2",
-    "3": "Practice 3",
-    "fp3": "Practice 3",
-}
-
-
-async def get_practice_session(
-    fp_number: str = "1", year: int | None = None
-) -> SessionResult:
-    """Return the most recently completed OpenF1 practice session.
-
-    fp_number: '1', '2', or '3' (also accepts 'fp1', 'fp2', 'fp3')
-    year: season year, defaults to current year
-    """
-    try:
-        session_name = FP_SESSION_NAMES.get(fp_number.lower(), "Practice 1")
-        if year is None:
-            year = datetime.now(timezone.utc).year
-        results = await _openf1_get(
-            "/sessions",
-            params={"session_name": session_name, "year": year},
-        )
-        now = datetime.now(timezone.utc)
-        past = [
-            r
-            for r in results
-            if (dt := _parse_iso_datetime(r.get("date_start", ""))) is not None
-            and dt <= now
-        ]
-        match past:
-            case []:
-                return Failure(error=f"no past FP{fp_number} session found")
-            case past_list:
-                past_list.sort(
-                    key=lambda r: (
-                        _parse_iso_datetime(r.get("date_start", ""))
-                        or datetime.min.replace(tzinfo=timezone.utc)
+            except DataError:
+                logger.warning("OpenF1 timing unavailable; keeping published schedule")
+                timings = []
+            if isinstance(timings, list):
+                updated = []
+                for race in races:
+                    sessions = []
+                    for slot in race.sessions:
+                        candidates = []
+                        names = {OPENF1_NAMES[slot.key]}
+                        if slot.key == "sprint_qualifying":
+                            names.add("Sprint Shootout")
+                        for row in timings:
+                            try:
+                                start = parse_datetime(row["date_start"])
+                                end = (
+                                    parse_datetime(row["date_end"])
+                                    if row.get("date_end")
+                                    else None
+                                )
+                                delta = abs((start - slot.start).total_seconds())
+                                if (
+                                    row.get("session_name") in names
+                                    and delta <= 6 * 3600
+                                    and (end is None or end > start)
+                                ):
+                                    candidates.append(
+                                        (delta, Session(slot.key, start, end))
+                                    )
+                            except (KeyError, ValueError, TypeError):
+                                continue
+                        sessions.append(
+                            min(candidates, key=lambda item: item[0])[1]
+                            if candidates
+                            else slot
+                        )
+                    updated.append(
+                        replace(
+                            race,
+                            sessions=tuple(sorted(sessions, key=lambda s: s.start)),
+                        )
                     )
+                races = updated
+        return sorted(races, key=lambda race: race.start)
+
+    async def openf1_session(self, race: Race, kind: str) -> dict | None:
+        """Match a session to its expected start rather than using latest.
+
+        Args:
+            race: Exact championship weekend.
+            kind: Normalized session key.
+
+        Returns:
+            A matching session within six hours, or None if unpublished.
+
+        Raises:
+            DataError: If OpenF1 is unavailable or malformed.
+        """
+        slot = next((s for s in race.sessions if s.key == kind), None)
+        if slot is None or race.season < 2023:
+            return None
+        names = {OPENF1_NAMES[kind]}
+        if kind == "sprint_qualifying":
+            names.add("Sprint Shootout")
+        rows = await self._get(
+            self.openf1_base,
+            "/sessions",
+            {
+                "year": race.season,
+                "date_start>": (slot.start - timedelta(hours=6)).isoformat(),
+                "date_start<": (slot.start + timedelta(hours=6)).isoformat(),
+            },
+            ttl=300,
+        )
+        if not isinstance(rows, list):
+            raise DataError("场次数据格式异常，请稍后重试。")
+        candidates = []
+        for row in rows:
+            try:
+                delta = abs(
+                    (parse_datetime(row["date_start"]) - slot.start).total_seconds()
                 )
-                return Success(value=OpenF1Session.model_validate(past_list[-1]))
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
+                if row.get("session_name") in names and delta <= 6 * 3600:
+                    candidates.append((delta, row))
+            except (KeyError, ValueError, TypeError):
+                continue
+        return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
+    async def results(self, race: Race, kind: str) -> Table | None:
+        """Read results for an exact season, round, and session.
 
-async def get_drivers_for_session(session_key: int | str) -> DriversResult:
-    """Return driver info for a given OpenF1 session key."""
-    try:
-        raw = await _openf1_get("/drivers", params={"session_key": session_key})
-        drivers = [OpenF1Driver.model_validate(d) for d in raw]
-        return Success(value=drivers)
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
+        Args:
+            race: Weekend whose results are requested.
+            kind: Session key, or grid for the race starting grid.
 
+        Returns:
+            A display table, or None when official results are unpublished.
 
-async def get_starting_grid(session_key: int | str) -> GridResult:
-    """Return starting grid sorted by position using OpenF1 /starting_grid."""
-    try:
-        raw = await _openf1_get(
-            "/starting_grid", params={"session_key": session_key}
+        Raises:
+            DataError: On unavailable providers or malformed result payloads.
+        """
+        if kind.startswith("practice") or kind in ("grid", "sprint_qualifying"):
+            return await self._openf1_results(race, kind)
+        endpoint, field = {
+            "race": ("results", "Results"),
+            "qualifying": ("qualifying", "QualifyingResults"),
+            "sprint": ("sprint", "SprintResults"),
+        }[kind]
+        data = await self._get(
+            self.jolpica_base,
+            f"/{race.season}/{race.round}/{endpoint}.json",
+            {"limit": 100},
+            ttl=30,
         )
-        if not raw:
-            return Success(value=[])
-        grid = sorted(
-            (OpenF1Position.model_validate(e) for e in raw),
-            key=lambda x: x.position,
+        try:
+            races = data["MRData"]["RaceTable"]["Races"]
+            raw = next(
+                (
+                    r
+                    for r in races
+                    if str(r.get("season")) == str(race.season)
+                    and str(r.get("round")) == str(race.round)
+                ),
+                None,
+            )
+            rows = raw.get(field, []) if raw else []
+            if not rows:
+                return None
+            output = []
+            for row in rows:
+                driver = row.get("Driver") or {}
+                name = (
+                    f"{driver.get('givenName', '')} {driver.get('familyName', '')}".strip()
+                    or driver.get("driverId", "—")
+                )
+                prefix = (
+                    str(row.get("positionText") or row.get("position") or "—"),
+                    name,
+                    str((row.get("Constructor") or {}).get("name") or "—"),
+                )
+                if kind == "qualifying":
+                    output.append(
+                        prefix
+                        + tuple(str(row.get(q) or "—") for q in ("Q1", "Q2", "Q3"))
+                    )
+                else:
+                    detail = (
+                        (row.get("Time") or {}).get("time") or row.get("status") or "—"
+                    )
+                    output.append(prefix + (str(detail), str(row.get("points") or "0")))
+            columns = (
+                ("名次", "车手", "车队", "Q1", "Q2", "Q3")
+                if kind == "qualifying"
+                else ("名次", "车手", "车队", "用时 / 状态", "积分")
+            )
+            return Table(
+                f"{SESSION_NAMES[kind]}结果",
+                f"{race.season} 第 {race.round} 站 · {race.name}",
+                columns,
+                tuple(output),
+                "数据来源：Jolpica-F1 · 以官方最终分类为准",
+                race.circuit_id,
+            )
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise DataError("比赛结果格式异常，请稍后重试。") from exc
+
+    async def _openf1_results(self, race: Race, kind: str) -> Table | None:
+        """Join a precisely matched OpenF1 session result with driver names.
+
+        Args:
+            race: Exact weekend.
+            kind: Practice, sprint qualifying, or grid.
+
+        Returns:
+            A complete display table, or None while data is missing.
+
+        Raises:
+            DataError: If OpenF1 is unavailable or returns invalid rows.
+        """
+        session = await self.openf1_session(race, "race" if kind == "grid" else kind)
+        if not session:
+            return None
+        params = {"session_key": session["session_key"]}
+        rows = await self._get(
+            self.openf1_base,
+            "/starting_grid" if kind == "grid" else "/session_result",
+            params,
+            ttl=30,
         )
-        return Success(value=grid)
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
-
-
-async def get_meeting_for_session(session_key: int | str) -> MeetingResult:
-    """Return meeting info for an OpenF1 session key."""
-    try:
-        # First resolve the meeting_key from the session, then query meetings
-        sessions = await _openf1_get("/sessions", params={"session_key": session_key})
-        if not sessions:
-            return Failure(error="no session found")
-        meeting_key = sessions[0].get("meeting_key")
-        if not meeting_key:
-            return Failure(error="session has no meeting_key")
-        results = await _openf1_get("/meetings", params={"meeting_key": meeting_key})
-        match results:
-            case [first, *_]:
-                return Success(value=OpenF1Meeting.model_validate(first))
-            case _:
-                return Failure(error="no meeting found")
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
-
-
-async def get_session_result(session_key: int | str) -> SessionResultsResult:
-    """Return session result (standings) for a given OpenF1 session.
-
-    Each entry: position, driver_number, duration (best lap s), gap_to_leader,
-    number_of_laps.  Sorted by position ascending.
-    """
-    try:
-        raw = await _openf1_get("/session_result", params={"session_key": session_key})
-        results = sorted(
-            (OpenF1SessionResult.model_validate(r) for r in raw),
-            key=lambda x: x.position,
+        if not isinstance(rows, list):
+            raise DataError("场次结果格式异常，请稍后重试。")
+        if not rows:
+            return None
+        drivers = await self._get(self.openf1_base, "/drivers", params, ttl=86400)
+        if not isinstance(drivers, list):
+            raise DataError("车手数据格式异常，请稍后重试。")
+        by_number = {d.get("driver_number"): d for d in drivers}
+        output = []
+        for row in sorted(rows, key=lambda r: r.get("position") or 999):
+            driver = by_number.get(row.get("driver_number"), {})
+            name = driver.get("full_name") or f"#{row.get('driver_number', '—')}"
+            duration = row.get("lap_duration" if kind == "grid" else "duration")
+            if isinstance(duration, list):
+                duration = next(
+                    (
+                        v
+                        for v in reversed(duration)
+                        if isinstance(v, (int, float)) and v > 0
+                    ),
+                    None,
+                )
+            detail = "—"
+            if (
+                isinstance(duration, (int, float))
+                and math.isfinite(duration)
+                and duration > 0
+            ):
+                minutes, seconds = divmod(round(duration * 1000), 60000)
+                detail = f"{minutes}:{seconds / 1000:06.3f}"
+            for flag in ("dsq", "dns", "dnf"):
+                if row.get(flag):
+                    detail = flag.upper()
+                    break
+            output.append(
+                (
+                    str(row.get("position") or "—"),
+                    str(name),
+                    str(driver.get("team_name") or "—"),
+                    detail,
+                )
+            )
+        title = "正赛发车顺序" if kind == "grid" else f"{SESSION_NAMES[kind]}结果"
+        return Table(
+            title,
+            f"{race.season} 第 {race.round} 站 · {race.name}",
+            ("名次", "车手", "车队", "圈速 / 状态"),
+            tuple(output),
+            "数据来源：OpenF1 · 数据可能延迟发布",
+            race.circuit_id,
         )
-        return Success(value=results)
-    except (
-        aiohttp.ClientError,
-        KeyError,
-        ValueError,
-        TypeError,
-        asyncio.TimeoutError,
-    ) as exc:
-        return Failure(error=str(exc))
+
+    async def standings(self, season: int, category: str) -> Table | None:
+        """Fetch championship standings without silently selecting another year.
+
+        Args:
+            season: Championship year.
+            category: drivers or teams.
+
+        Returns:
+            Standings table, or None before the first published standings.
+
+        Raises:
+            DataError: On unavailable providers or malformed payloads.
+        """
+        teams = category == "teams"
+        endpoint = "constructorStandings" if teams else "driverStandings"
+        data = await self._get(
+            self.jolpica_base, f"/{season}/{endpoint}.json", {"limit": 100}, ttl=300
+        )
+        try:
+            lists = data["MRData"]["StandingsTable"]["StandingsLists"]
+            if not lists:
+                return None
+            standing = lists[0]
+            output = []
+            for row in standing["ConstructorStandings" if teams else "DriverStandings"]:
+                if teams:
+                    name = row["Constructor"]["name"]
+                    detail = ()
+                else:
+                    driver = row["Driver"]
+                    name = f"{driver['givenName']} {driver['familyName']}"
+                    detail = (
+                        " / ".join(c["name"] for c in row.get("Constructors", []))
+                        or "—",
+                    )
+                output.append(
+                    (str(row.get("positionText") or row["position"]), name)
+                    + detail
+                    + (str(row["points"]), str(row["wins"]))
+                )
+            columns = (
+                ("名次", "车队", "积分", "胜场")
+                if teams
+                else ("名次", "车手", "车队", "积分", "胜场")
+            )
+            return (
+                Table(
+                    "车队积分榜" if teams else "车手积分榜",
+                    f"{season} 赛季 · 第 {standing.get('round', '—')} 站后",
+                    columns,
+                    tuple(output),
+                    "数据来源：Jolpica-F1",
+                )
+                if output
+                else None
+            )
+        except (KeyError, TypeError) as exc:
+            raise DataError("积分榜数据格式异常，请稍后重试。") from exc

@@ -1,32 +1,32 @@
 {
   "enable_image_render": {
-    "description": "图片渲染模式",
+    "description": "图片卡片输出",
     "type": "bool",
-    "hint": "开启后，所有查询命令与推送通知将以仿F1官方风格的图片形式输出，而非纯文本。需要 Pillow + CairoSVG 渲染环境支持。",
+    "hint": "查询与通知使用图片卡片。关闭时不执行图片渲染；渲染或图片发送失败时回退纯文本。",
     "default": false
   },
+  "timezone": {
+    "description": "显示时区",
+    "type": "string",
+    "hint": "IANA 时区名称，例如 Asia/Shanghai、Europe/London。仅影响显示，调度统一使用 UTC。",
+    "default": "Asia/Shanghai"
+  },
   "result_poll_delay": {
-    "description": "比赛结果轮询延迟（分钟）",
+    "description": "结果轮询延迟（分钟）",
     "type": "int",
-    "hint": "比赛/排位赛/练习赛结束后，等待多少分钟再开始轮询并推送比赛结果。默认 5 分钟。调低此值可更快收到推送，但 API 数据可能尚未更新。",
+    "hint": "预计场次结束后开始查询结果的额外等待时间，范围 0–120。数据未发布时继续重试。",
     "default": 5
   },
   "image_cache_max_age": {
-    "description": "图片缓存最大保留时间（分钟）",
+    "description": "图片缓存保留时间（分钟）",
     "type": "int",
-    "hint": "渲染生成的临时图片文件超过此时间（分钟）后将被自动删除。默认 30 分钟。",
+    "hint": "清理超过此时间的卡片文件，范围 1–1440。",
     "default": 30
   },
   "image_cache_max_count": {
-    "description": "最大图片缓存数量",
+    "description": "图片缓存数量上限",
     "type": "int",
-    "hint": "内存中最多保留的渲染临时图片路径数量。超出此限制时会触发一次清理，删除最旧的图片文件。默认 50 张。",
+    "hint": "最多保留的卡片文件数量，范围 1–200。",
     "default": 50
-  },
-  "headshot_cache_max": {
-    "description": "最大车手头像缓存数量",
-    "type": "int",
-    "hint": "内存中最多缓存的车手头像（从网络下载）数量。超出后将清除最早缓存的头像。默认 30 张。",
-    "default": 30
   }
 }

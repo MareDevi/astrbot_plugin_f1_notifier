@@ -1,1277 +1,609 @@
-"""Pillow-based image renderer for F1 plugin.
-
-Generates broadcast-style F1 graphics using Pillow + CairoSVG.
-Uses:
-  - Local Orbitron TTF fonts for the racing aesthetic
-  - Local circuit SVG files rendered via CairoSVG
-  - Team colours mapped from constructor names
-
-Each public ``render_*`` function returns a **file path** (str) pointing
-to a temporary PNG. The caller passes the path directly to
-``event.image_result(path)`` or ``Image.fromFileSystem(path)``.
-"""
+"""Generate polished F1 presentation cards with Pillow."""
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import io
+import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+import time
 from pathlib import Path
+from types import MappingProxyType
 
-import aiohttp
-import cairosvg
 from PIL import Image, ImageDraw, ImageFont
 
-from .models import (
-    F1RaceWeekend,
-    F1SessionSlot,
-    JolpicaConstructorStanding,
-    JolpicaDriverStanding,
-    OpenF1Driver,
-    OpenF1Position,
-    OpenF1Session,
-    OpenF1SessionResult,
-)
-
-# ── Plugin config (injected at runtime via configure()) ───────────────────────
-
-_renderer_config: dict = {}
-
-
-def configure(config) -> None:
-    """Receive plugin config dict from the main plugin/scheduler."""
-    global _renderer_config
-    _renderer_config = config or {}
-
-
-# ── Paths ──────────────────────────────────────────────────────────────────────
-
-_ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "assets"
-_FONTS_DIR = _ASSETS_DIR / "fonts"
-_CIRCUITS_DIR = _ASSETS_DIR / "circuits"
-
-# Flags stored under the AstrBot data directory for persistence across updates
 try:
-    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+    import cairosvg
+except (ImportError, OSError):
+    cairosvg = None
 
-    _FLAGS_DIR = (
-        Path(get_astrbot_data_path())
-        / "plugin_data"
-        / "astrbot_plugin_f1_notifier"
-        / "flags"
-    )
-except Exception:
-    _FLAGS_DIR = _ASSETS_DIR / "flags"
+from .models import Table
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-
-SCALE = 2  # render at 2× resolution for sharper images
-
-
-def _s(v: int | float) -> int:
-    """Scale a pixel value by the global SCALE factor."""
-    return int(v * SCALE)
-
-
-CARD_W = _s(700)
-HEADER_H = _s(80)
-ROW_H = _s(56)
-FOOTER_H = _s(36)
-ROW_MARGIN_X = _s(12)
-ROW_MARGIN_Y = _s(4)
-ROW_RADIUS = _s(10)
-TEAM_BAR_W = _s(4)
-
-# Colours
-BG_TOP = (21, 21, 30)  # #15151E
-BG_BOT = (26, 26, 46)  # #1A1A2E
-HEADER_RED = (225, 6, 0)  # #E10600
-WHITE = (255, 255, 255)
-GOLD = (255, 215, 0)
-SILVER = (192, 192, 192)
-BRONZE = (205, 127, 50)
-RED_ACCENT = (225, 6, 0)
-
-CST = timezone(timedelta(hours=8))
-
-# ── Team colours ───────────────────────────────────────────────────────────────
-
-TEAM_COLOURS: dict[str, tuple[int, int, int]] = {
-    "red bull": (54, 113, 198),
-    "ferrari": (232, 0, 45),
-    "mclaren": (255, 128, 0),
-    "mercedes": (39, 244, 210),
-    "aston martin": (34, 153, 113),
-    "alpine": (0, 147, 204),
-    "williams": (100, 196, 255),
-    "racing bulls": (102, 146, 255),
-    "rb": (102, 146, 255),
-    "haas": (182, 186, 189),
-    "sauber": (82, 226, 82),
-    "audi": (255, 0, 0),
-    "cadillac": (144, 144, 144),
+_LAYOUT_VERSION = "f1-card-v1"
+_PLUGIN_ROOT = Path(__file__).resolve().parents[2]
+_ASSETS_DIR = _PLUGIN_ROOT / "assets"
+_FONTS_DIR = _ASSETS_DIR / "fonts"
+_CARD_WIDTH = 1200
+_MARGIN = 56
+_CACHE_PREFIX = "f1-card-"
+_CIRCUIT_SVG_MAP = MappingProxyType(
+    {
+        "albert_park": "melbourne",
+        "shanghai": "shanghai",
+        "suzuka": "suzuka",
+        "bahrain": "bahrain",
+        "jeddah": "jeddah",
+        "miami": "miami",
+        "imola": "imola",
+        "monaco": "monaco",
+        "catalunya": "catalunya",
+        "villeneuve": "montreal",
+        "red_bull_ring": "spielberg",
+        "silverstone": "silverstone",
+        "spa": "spa-francorchamps",
+        "hungaroring": "hungaroring",
+        "zandvoort": "zandvoort",
+        "monza": "monza",
+        "baku": "baku",
+        "marina_bay": "marina-bay",
+        "americas": "austin",
+        "rodriguez": "mexico-city",
+        "interlagos": "interlagos",
+        "vegas": "las-vegas",
+        "losail": "lusail",
+        "yas_marina": "yas-marina",
+        "madring": "madring",
+        "portimao": "portimao",
+        "istanbul": "istanbul",
+        "mugello": "mugello",
+        "sochi": "sochi",
+        "nurburgring": "nurburgring",
+        "hockenheimring": "hockenheimring",
+        "sepang": "sepang",
+        "yeongam": "yeongam",
+        "buddh": "buddh",
+    }
+)
+_CJK_FONTS = {
+    False: (
+        Path("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+        Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+        Path("C:/Windows/Fonts/msyh.ttc"),
+        Path("C:/Windows/Fonts/simhei.ttf"),
+        Path("/usr/share/fonts/noto/NotoSans-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ),
+    True: (
+        Path("/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+        Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+        Path("C:/Windows/Fonts/msyhbd.ttc"),
+        Path("C:/Windows/Fonts/simhei.ttf"),
+        Path("/usr/share/fonts/noto/NotoSans-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    ),
 }
 
-# Jolpica circuit_id → SVG filename stem (julesr0y/f1-circuits-svg)
-CIRCUIT_SVG_MAP: dict[str, str] = {
-    "albert_park": "melbourne-2",
-    "shanghai": "shanghai-1",
-    "suzuka": "suzuka-2",
-    "bahrain": "bahrain-1",
-    "jeddah": "jeddah-1",
-    "miami": "miami-1",
-    "imola": "imola-3",
-    "monaco": "monaco-6",
-    "catalunya": "catalunya-6",
-    "villeneuve": "montreal-6",
-    "red_bull_ring": "spielberg-3",
-    "silverstone": "silverstone-8",
-    "spa": "spa-francorchamps-4",
-    "hungaroring": "hungaroring-3",
-    "zandvoort": "zandvoort-5",
-    "monza": "monza-7",
-    "baku": "baku-1",
-    "marina_bay": "marina-bay-4",
-    "americas": "austin-1",
-    "rodriguez": "mexico-city-3",
-    "interlagos": "interlagos-2",
-    "vegas": "las-vegas-1",
-    "losail": "lusail-1",
-    "yas_marina": "yas-marina-2",
-    "madring": "madring-1",
-    "portimao": "portimao-1",
-    "istanbul": "istanbul-1",
-    "mugello": "mugello-1",
-    "sochi": "sochi-1",
-    "nurburgring": "nurburgring-4",
-    "hockenheimring": "hockenheimring-4",
-    "sepang": "sepang-1",
-    "yeongam": "yeongam-1",
-    "buddh": "buddh-1",
-}
 
-FLAG_MAP: dict[str, str] = {
-    "Australia": "AU",
-    "China": "CN",
-    "Japan": "JP",
-    "Bahrain": "BH",
-    "Saudi Arabia": "SA",
-    "USA": "US",
-    "United States": "US",
-    "Canada": "CA",
-    "Monaco": "MC",
-    "Spain": "ES",
-    "Austria": "AT",
-    "UK": "GB",
-    "United Kingdom": "GB",
-    "Belgium": "BE",
-    "Hungary": "HU",
-    "Netherlands": "NL",
-    "Italy": "IT",
-    "Azerbaijan": "AZ",
-    "Singapore": "SG",
-    "Mexico": "MX",
-    "Brazil": "BR",
-    "UAE": "AE",
-    "United Arab Emirates": "AE",
-    "Qatar": "QA",
-}
+class ImageRenderer:
+    """Render structured tables as cached F1 cards.
 
-# ── Font loading ───────────────────────────────────────────────────────────────
+    Args:
+        data_dir: Directory for generated PNG files.
+        max_age_minutes: Maximum cache age in minutes.
+        max_count: Maximum number of generated cards to retain.
+    """
 
-_font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
+    def __init__(
+        self,
+        data_dir: Path,
+        max_age_minutes: int = 30,
+        max_count: int = 50,
+    ) -> None:
+        self.data_dir = Path(data_dir).expanduser().resolve()
+        self.max_age_minutes = max(0, int(max_age_minutes))
+        self.max_count = max(1, int(max_count))
+        self._semaphore = asyncio.Semaphore(1)
+        self._state_lock = asyncio.Lock()
+        self._workers: dict[asyncio.Task[Path], asyncio.Event] = {}
+        self._font_cache: dict[tuple[int, bool], ImageFont.FreeTypeFont] = {}
+        self._closed = False
 
+    async def render(self, table: Table) -> Path:
+        """Render a table to a PNG card.
 
-def _font(weight: str = "Bold", size: int = 14) -> ImageFont.FreeTypeFont:
-    """Load an Orbitron font variant, cached. Font sizes are auto-scaled."""
-    scaled = _s(size)
-    key = (weight, scaled)
-    if key not in _font_cache:
-        path = _FONTS_DIR / f"Orbitron-{weight}.ttf"
-        if not path.exists():
-            path = _FONTS_DIR / "Orbitron-Regular.ttf"
-        _font_cache[key] = ImageFont.truetype(str(path), scaled)
-    return _font_cache[key]
+        Args:
+            table: Structured content to draw.
 
+        Returns:
+            Path to the generated or cached PNG file.
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-
-def _flag(country: str) -> str:
-    return FLAG_MAP.get(country, "")
-
-
-def _cc_to_twemoji_stem(code: str) -> str:
-    """Convert 2-letter country code to twemoji filename stem, e.g. 'AU' → '1f1e6-1f1fa'."""
-    return "-".join(f"{0x1F1E6 + ord(c) - ord('A'):x}" for c in code.upper())
-
-
-async def _download_to_file(url: str, dest: Path, timeout: int = 5) -> bool:
-    """Download a URL to a local file. Returns True on success."""
-    if not url.startswith(("http://", "https://")):
-        return False
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                headers={"User-Agent": "AstrBot/1.0"},
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                resp.raise_for_status()
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(await resp.read())
-        return True
-    except Exception:
-        return False
-
-
-async def _load_flag_image(country: str, size: int = 20) -> Image.Image | None:
-    """Load a flag image (twemoji SVG) for a country name."""
-    code = FLAG_MAP.get(country)
-    if not code:
-        return None
-    stem = _cc_to_twemoji_stem(code)
-    svg_path = _FLAGS_DIR / f"{stem}.svg"
-    if not svg_path.exists():
-        url = (
-            f"https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/svg/{stem}.svg"
-        )
-        if not await _download_to_file(url, svg_path):
-            return None
-    try:
-        png_data = cairosvg.svg2png(
-            url=str(svg_path), output_width=size, output_height=size
-        )
-        return Image.open(io.BytesIO(png_data)).convert("RGBA")
-    except Exception:
-        return None
-
-
-# url → circular Image (or None on failure); bounded by headshot_cache_max config
-_HEADSHOTS_CACHE: dict[str, Image.Image | None] = {}
-
-
-def _make_circular(source: Image.Image, size: int) -> Image.Image:
-    """Resize image to a circle of given size."""
-    source = source.resize((size, size), Image.Resampling.LANCZOS)
-    mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
-    result = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    result.paste(source, (0, 0), mask)
-    return result
-
-
-async def _load_headshot(url: str | None, size: int = 32) -> Image.Image | None:
-    """Download and cache driver headshot as a circular image."""
-    if not url:
-        return None
-    if not url.startswith(("http://", "https://")):
-        return None
-    if url in _HEADSHOTS_CACHE:
-        cached = _HEADSHOTS_CACHE[url]
-        return cached.copy() if cached else None
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                headers={"User-Agent": "AstrBot/1.0"},
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.content.read(1024 * 1024)  # Max 1 MB
-        raw = Image.open(io.BytesIO(data)).convert("RGBA")
-        result = _make_circular(raw, size)
-        _headshot_cache_evict()
-        _HEADSHOTS_CACHE[url] = result
-        return result.copy()
-    except Exception:
-        _headshot_cache_evict()
-        _HEADSHOTS_CACHE[url] = None
-        return None
-
-
-def _headshot_cache_evict() -> None:
-    """Remove oldest headshot entries when the cache exceeds the configured max."""
-    max_count = int(_renderer_config.get("headshot_cache_max", 30))
-    while len(_HEADSHOTS_CACHE) >= max_count:
+        Raises:
+            RuntimeError: If the renderer has already been closed.
+        """
+        await self._semaphore.acquire()
+        task: asyncio.Task[Path] | None = None
         try:
-            _HEADSHOTS_CACHE.pop(next(iter(_HEADSHOTS_CACHE)))
-        except StopIteration:
-            break
+            async with self._state_lock:
+                if self._closed:
+                    raise RuntimeError("ImageRenderer is closed")
+                task = asyncio.create_task(asyncio.to_thread(self._render_sync, table))
+                event = asyncio.Event()
+                self._workers[task] = event
 
+                def worker_finished(done: asyncio.Task[Path]) -> None:
+                    try:
+                        done.result()
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    self._workers.pop(done, None)
+                    event.set()
+                    self._semaphore.release()
 
-async def _draw_flagged_text(
-    img: Image.Image,
-    draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int],
-    country: str,
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    fill: tuple,
-    flag_size: int = _s(20),
-) -> None:
-    """Draw an optional flag image followed by text."""
-    x, y_pos = xy
-    flag_img = await _load_flag_image(country, flag_size)
-    if flag_img is not None:
-        flag_y = y_pos + max(0, (font.size - flag_size) // 2)
-        img.paste(flag_img, (x, int(flag_y)), flag_img)
-        x += flag_size + _s(6)
-    draw.text((x, y_pos), text, fill=fill, font=font)
+                task.add_done_callback(worker_finished)
+        except BaseException:
+            if task is None:
+                self._semaphore.release()
+            raise
 
+        await asyncio.shield(event.wait())
+        return task.result()
 
-def _team_colour(constructor_name: str) -> tuple[int, int, int]:
-    name_lower = constructor_name.lower()
-    for key, colour in TEAM_COLOURS.items():
-        if key in name_lower:
-            return colour
-    return (255, 255, 255)
+    async def close(self) -> None:
+        """Close the renderer after all in-flight card work finishes."""
+        async with self._state_lock:
+            self._closed = True
+            events = tuple(self._workers.values())
+        if events:
+            await asyncio.gather(*(event.wait() for event in events))
 
+    def _load_font(self, size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+        """Load the first available CJK-capable font.
 
-def _parse_openf1_team_colour(drv: OpenF1Driver) -> tuple[int, int, int] | None:
-    """Parse hex team colour from OpenF1 driver data."""
-    if not drv.team_colour:
-        return None
-    try:
-        h = drv.team_colour.lstrip("#")
-        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-    except (ValueError, IndexError):
-        return None
+        Args:
+            size: Requested font size in pixels.
+            bold: Whether to prefer a bold face.
 
+        Returns:
+            A Pillow font object. A bundled font or Pillow's default is used
+            when no system CJK font is installed.
+        """
+        key = (size, bold)
+        if key in self._font_cache:
+            return self._font_cache[key]
 
-def _utc_to_cst(date_str: str, time_str: str) -> str:
-    try:
-        return datetime.fromisoformat(f"{date_str}T{time_str}").astimezone(CST).strftime("%m-%d %H:%M")
-    except (ValueError, TypeError, AttributeError):
-        return f"{date_str} {time_str}"
-
-
-def _session_cst(s: F1SessionSlot | None) -> str | None:
-    if s is None:
-        return None
-    return _utc_to_cst(s.date, s.time)
-
-
-def _format_lap_duration(seconds: float) -> str:
-    if seconds <= 0:
-        return "-"
-    m = int(seconds) // 60
-    s = seconds - m * 60
-    return f"{m}:{s:06.3f}"
-
-
-def _load_circuit_image(circuit_id: str, size: int = 80) -> Image.Image | None:
-    """Load circuit SVG as a Pillow RGBA image."""
-    layout_id = CIRCUIT_SVG_MAP.get(circuit_id, "")
-    if not layout_id:
-        return None
-    svg_path = _CIRCUITS_DIR / f"{layout_id}.svg"
-    if not svg_path.exists():
-        return None
-    try:
-        png_data = cairosvg.svg2png(
-            url=str(svg_path), output_width=size, output_height=size
-        )
-        return Image.open(io.BytesIO(png_data)).convert("RGBA")
-    except Exception:
-        return None
-
-
-def _load_f1_logo(size: int = 50) -> Image.Image | None:
-    """Load the F1 logo SVG from assets."""
-    svg_path = _ASSETS_DIR / "f1.svg"
-    if not svg_path.exists():
-        return None
-    try:
-        png_data = cairosvg.svg2png(
-            url=str(svg_path), output_width=size, output_height=size
-        )
-        return Image.open(io.BytesIO(png_data)).convert("RGBA")
-    except Exception:
-        return None
-
-
-def _pos_colour(pos: int) -> tuple[int, int, int]:
-    if pos == 1:
-        return GOLD
-    if pos == 2:
-        return SILVER
-    if pos == 3:
-        return BRONZE
-    return WHITE
-
-
-_generated_files: list[tuple[float, str]] = []
-_save_counter = 0
-
-
-def _get_cleanup_max_age() -> float:
-    """Max age in seconds before cached images are deleted (from config)."""
-    return int(_renderer_config.get("image_cache_max_age", 30)) * 60
-
-
-def _get_cache_max_count() -> int:
-    """Max number of generated image files to keep in the cache list."""
-    return int(_renderer_config.get("image_cache_max_count", 50))
-
-
-def _cleanup_old_images() -> None:
-    """Remove generated temp images that are too old or exceed the max count."""
-    import os
-    import time
-
-    max_age = _get_cleanup_max_age()
-    max_count = _get_cache_max_count()
-    now = time.time()
-    remaining: list[tuple[float, str]] = []
-    for ts, fpath in _generated_files:
-        if now - ts > max_age:
+        bundled = _FONTS_DIR / ("Orbitron-Bold.ttf" if bold else "Orbitron-Regular.ttf")
+        for path in (*_CJK_FONTS[bold], bundled):
             try:
-                os.remove(fpath)
-            except OSError:
-                pass
-        else:
-            remaining.append((ts, fpath))
-    # Also enforce max count: evict oldest entries first
-    while len(remaining) > max_count:
-        _, fpath = remaining.pop(0)
+                font = ImageFont.truetype(str(path), size)
+            except (OSError, ValueError):
+                continue
+            self._font_cache[key] = font
+            return font
+
         try:
-            os.remove(fpath)
+            return ImageFont.load_default(size=size)
+        except TypeError:
+            return ImageFont.load_default()
+
+    def _ellipsize(
+        self,
+        text: str,
+        font: ImageFont.ImageFont,
+        max_width: float,
+    ) -> str:
+        """Trim text to a measured width with a trailing ellipsis.
+
+        Args:
+            text: Text to measure.
+            font: Font used for drawing.
+            max_width: Available horizontal space.
+
+        Returns:
+            Text that fits the requested width.
+        """
+        if not text:
+            return ""
+        measure = ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength
+        if measure(text, font=font) <= max_width:
+            return text
+        suffix = "…"
+        while text and measure(text + suffix, font=font) > max_width:
+            text = text[:-1]
+        return text + suffix
+
+    def _wrap(
+        self,
+        text: str,
+        font: ImageFont.ImageFont,
+        max_width: float,
+        max_lines: int = 3,
+    ) -> list[str]:
+        """Wrap text by measured glyph width without exceeding line limits.
+
+        Args:
+            text: Text to wrap.
+            font: Font used for drawing.
+            max_width: Available width for each line.
+            max_lines: Maximum number of lines to return.
+
+        Returns:
+            Wrapped lines. Overflow is replaced by an ellipsis on the last line.
+        """
+        text = " ".join(str(text).splitlines()).strip()
+        if not text:
+            return [""]
+
+        measure = ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength
+        lines: list[str] = []
+        remaining = text
+        while remaining and len(lines) < max_lines:
+            candidate = ""
+            split_at = 0
+            for index, character in enumerate(remaining):
+                trial = candidate + character
+                if candidate and measure(trial, font=font) > max_width:
+                    break
+                candidate = trial
+                if character in (" ", "/", "-", "·"):
+                    split_at = index + 1
+            if candidate == remaining:
+                lines.append(candidate)
+                return lines
+            if split_at and split_at < len(candidate):
+                lines.append(candidate[:split_at].rstrip())
+                remaining = remaining[split_at:].lstrip()
+            else:
+                lines.append(candidate.rstrip())
+                remaining = remaining[len(candidate) :].lstrip()
+
+        if remaining:
+            lines[-1] = self._ellipsize(f"{lines[-1]}…{remaining}", font, max_width)
+        return lines
+
+    def _circuit_svg_path(
+        self, circuit_id: str, circuits_dir: Path | None = None
+    ) -> Path | None:
+        """Resolve an allowlisted circuit ID to its newest layout SVG.
+
+        Args:
+            circuit_id: External circuit identifier from the source API.
+            circuits_dir: Optional circuit directory override for testing.
+
+        Returns:
+            The highest-numbered matching SVG, or ``None`` when the identifier
+            is unknown or has no bundled layout.
+        """
+        stem = _CIRCUIT_SVG_MAP.get(str(circuit_id).strip().lower())
+        if stem is None:
+            return None
+        directory = circuits_dir or (_ASSETS_DIR / "circuits")
+        variants: list[tuple[int, Path]] = []
+        for path in directory.glob(f"{stem}-*.svg"):
+            suffix = path.stem.removeprefix(f"{stem}-")
+            if suffix.isdigit():
+                variants.append((int(suffix), path))
+        return max(variants, default=(0, None))[1]
+
+    def _circuit_graphic(
+        self, circuit_id: str, size: tuple[int, int]
+    ) -> Image.Image | None:
+        """Render a bundled circuit SVG when CairoSVG is available.
+
+        Args:
+            circuit_id: Circuit identifier from the table.
+            size: Requested image size.
+
+        Returns:
+            An RGBA circuit image, or ``None`` when no genuine asset can be
+            rendered.
+        """
+        width, height = size
+        if circuit_id and cairosvg is not None:
+            svg_path = self._circuit_svg_path(circuit_id)
+            if svg_path is not None:
+                output = io.BytesIO()
+                try:
+                    cairosvg.svg2png(
+                        url=str(svg_path),
+                        write_to=output,
+                        output_width=width,
+                        output_height=height,
+                    )
+                    output.seek(0)
+                    with Image.open(output) as source:
+                        return source.convert("RGBA")
+                except Exception:
+                    # CairoSVG can surface backend-specific parse exceptions.
+                    pass
+        return None
+
+    def _cache_path(self, table: Table) -> Path:
+        """Compute a deterministic cache path for a table.
+
+        Args:
+            table: Structured table content.
+
+        Returns:
+            Stable PNG path derived from every rendered field.
+        """
+        parts = [
+            _LAYOUT_VERSION,
+            table.title,
+            table.subtitle,
+            "\x1e".join(table.columns),
+            "\x1f".join("\x1e".join(row) for row in table.rows),
+            table.footer,
+            table.circuit_id,
+        ]
+        digest = hashlib.sha256("\x1d".join(parts).encode("utf-8")).hexdigest()[:24]
+        return self.data_dir / f"{_CACHE_PREFIX}{digest}.png"
+
+    def _prune_cache(self, keep: Path) -> None:
+        """Remove stale and excess generated cards.
+
+        Args:
+            keep: The card produced by the current render. It is never removed
+                by this cleanup pass.
+        """
+        try:
+            entries = sorted(
+                self.data_dir.glob(f"{_CACHE_PREFIX}*.png"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return
+
+        cutoff = time.time() - self.max_age_minutes * 60
+        retained_others = 0
+        for path in entries:
+            if path == keep:
+                continue
+            try:
+                too_old = path.stat().st_mtime < cutoff
+                too_many = retained_others >= self.max_count - 1
+                if too_old or too_many:
+                    path.unlink(missing_ok=True)
+                else:
+                    retained_others += 1
+            except OSError:
+                continue
+
+    def _render_sync(self, table: Table) -> Path:
+        """Render one table in a worker thread.
+
+        Args:
+            table: Structured content to draw.
+
+        Returns:
+            Path to the generated or cached PNG file.
+        """
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self._cache_path(table)
+        cache_fresh = False
+        try:
+            age = time.time() - output_path.stat().st_mtime
+            cache_fresh = age <= self.max_age_minutes * 60
         except OSError:
             pass
-    _generated_files.clear()
-    _generated_files.extend(remaining)
 
+        if not cache_fresh:
+            image = self._draw_card(table)
+            temporary_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=self.data_dir,
+                    prefix=".f1-card-",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temporary:
+                    temporary_path = Path(temporary.name)
+                image.save(temporary_path, format="PNG", optimize=True)
+                os.replace(temporary_path, output_path)
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
 
-def _save_image(img: Image.Image) -> str:
-    """Save image to a temp file and return the path. Old images are auto-cleaned."""
-    global _save_counter
-    import os
-    import time
+        self._prune_cache(output_path)
+        return output_path
 
-    fd, path = tempfile.mkstemp(suffix=".png")
-    img.save(path, format="PNG", optimize=True)
-    os.close(fd)
+    def _draw_card(self, table: Table) -> Image.Image:
+        """Draw the complete card image.
 
-    _generated_files.append((time.time(), path))
-    _save_counter += 1
-    # Trigger cleanup every 20 saves, or whenever the cache exceeds the max count
-    if _save_counter % 20 == 0 or len(_generated_files) > _get_cache_max_count():
-        _cleanup_old_images()
+        Args:
+            table: Structured content to draw.
 
-    return path
+        Returns:
+            A 1200-pixel-wide RGB card image.
+        """
+        table_width = _CARD_WIDTH - _MARGIN * 2
+        regular = self._load_font(18)
+        bold = self._load_font(19, bold=True)
+        header_font = self._load_font(17, bold=True)
+        title_font = self._load_font(36, bold=True)
+        subtitle_font = self._load_font(19)
+        footer_font = self._load_font(17)
 
-
-# ── Drawing primitives ─────────────────────────────────────────────────────────
-
-
-async def _create_card(
-    n_rows: int,
-    header_title: str,
-    header_sub: str,
-    circuit_id: str = "",
-    extra_body_h: int = 0,
-    country: str = "",
-) -> tuple[Image.Image, ImageDraw.ImageDraw, int]:
-    """Create the base card image with header. Returns (image, draw, y_cursor)."""
-    body_h = n_rows * (ROW_H + ROW_MARGIN_Y) + extra_body_h + FOOTER_H + _s(16)
-    total_h = HEADER_H + body_h
-    img = Image.new("RGBA", (CARD_W, total_h), BG_TOP)
-    draw = ImageDraw.Draw(img)
-
-    # Background bottom half
-    draw.rectangle((0, HEADER_H, CARD_W, total_h), fill=BG_BOT)
-
-    # Header bar
-    draw.rectangle((0, 0, CARD_W, HEADER_H), fill=HEADER_RED)
-
-    # Header text
-    title_font = _font("ExtraBold", 18)
-    sub_font = _font("Medium", 11)
-    await _draw_flagged_text(
-        img, draw, (_s(28), _s(18)), country, header_title, title_font, WHITE, flag_size=_s(22)
-    )
-    draw.text((_s(28), _s(46)), header_sub, fill=(255, 255, 255, 220), font=sub_font)
-
-    # F1 logo in header
-    logo = _load_f1_logo(_s(128))
-    if logo is not None:
-        logo_x = CARD_W - _s(28) - logo.width
-        logo_y = (HEADER_H - logo.height) // 2
-        img.paste(logo, (logo_x, logo_y), logo)
-
-    # Circuit overlay in header (semi-transparent)
-    circuit_img = _load_circuit_image(circuit_id, _s(56))
-    if circuit_img is not None:
-        alpha = circuit_img.split()[3].point(lambda p: int(p * 0.3))
-        circuit_img.putalpha(alpha)
-        cx = CARD_W - _s(180) - circuit_img.width
-        cy = (HEADER_H - circuit_img.height) // 2
-        img.paste(circuit_img, (cx, cy), circuit_img)
-
-    y = HEADER_H + _s(8)
-    return img, draw, y
-
-
-def _draw_footer(draw: ImageDraw.ImageDraw, img_h: int) -> None:
-    """Draw the footer text."""
-    footer_font = _font("Regular", 8)
-    text = "F1 NOTIFIER · POWERED BY ASTRBOT"
-    bbox = draw.textbbox((0, 0), text, font=footer_font)
-    tw = bbox[2] - bbox[0]
-    draw.text(
-        ((CARD_W - tw) // 2, img_h - FOOTER_H + _s(8)),
-        text,
-        fill=(255, 255, 255, 80),
-        font=footer_font,
-    )
-
-
-async def _draw_driver_row(
-    img: Image.Image,
-    draw: ImageDraw.ImageDraw,
-    y: int,
-    pos: int,
-    driver_name: str,
-    team_name: str,
-    team_colour: tuple[int, int, int],
-    acronym: str = "",
-    stats: list[tuple[str, str]] | None = None,
-    stat_col_widths: list[int] | None = None,
-    headshot_url: str | None = None,
-) -> int:
-    """Draw a single driver/result row. Returns new y position."""
-    x0 = ROW_MARGIN_X
-    x1 = CARD_W - ROW_MARGIN_X
-    row_y0 = y
-    row_y1 = y + ROW_H
-
-    # Row background with podium highlight
-    if pos == 1:
-        bg = (255, 215, 0, 25)
-    elif pos == 2:
-        bg = (192, 192, 192, 20)
-    elif pos == 3:
-        bg = (205, 127, 50, 20)
-    else:
-        bg = (255, 255, 255, 15 if (pos or 0) % 2 == 0 else 10)
-
-    # Overlay for alpha blending
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ovr_draw = ImageDraw.Draw(overlay)
-    ovr_draw.rounded_rectangle((x0, row_y0, x1, row_y1), radius=ROW_RADIUS, fill=bg)
-    img.alpha_composite(overlay)
-
-    # Team colour bar
-    draw.rectangle((x0, row_y0 + _s(6), x0 + TEAM_BAR_W, row_y1 - _s(6)), fill=team_colour)
-
-    # Position number
-    pos_font = _font("ExtraBold", 20)
-    pos_col = _pos_colour(pos)
-    draw.text(
-        (x0 + _s(16), row_y0 + (ROW_H - _s(24)) // 2), str(pos) if pos is not None else "-", fill=pos_col, font=pos_font
-    )
-
-    # Driver acronym circle or headshot
-    circle_x = x0 + _s(56)
-    circle_y = row_y0 + (ROW_H - _s(36)) // 2
-    circle_r = _s(18)
-
-    headshot = await _load_headshot(headshot_url, _s(32))
-    if headshot is not None:
-        # Team colour circle border
-        draw.ellipse(
-            (circle_x, circle_y, circle_x + circle_r * 2, circle_y + circle_r * 2),
-            outline=team_colour,
-            width=_s(2),
+        column_count = max(
+            len(table.columns),
+            max((len(row) for row in table.rows), default=0),
+            1,
         )
-        # Paste circular headshot inside border
-        img.paste(headshot, (circle_x + _s(2), circle_y + _s(2)), headshot)
-    else:
-        draw.ellipse(
-            (circle_x, circle_y, circle_x + circle_r * 2, circle_y + circle_r * 2),
-            outline=team_colour,
-            width=_s(2),
-        )
-        acr_font = _font("Bold", 11)
-        acr_text = acronym[:3].upper() if acronym else driver_name[:3].upper()
-        acr_bbox = draw.textbbox((0, 0), acr_text, font=acr_font)
-        acr_w = acr_bbox[2] - acr_bbox[0]
-        acr_h = acr_bbox[3] - acr_bbox[1]
-        draw.text(
-            (circle_x + circle_r - acr_w // 2, circle_y + circle_r - acr_h // 2 - _s(1)),
-            acr_text,
-            fill=WHITE,
-            font=acr_font,
+        columns = tuple(table.columns) + ("",) * (column_count - len(table.columns))
+        normalized_rows = tuple(
+            tuple(row) + ("",) * (column_count - len(row)) for row in table.rows
         )
 
-    # Driver name + team
-    name_x = circle_x + circle_r * 2 + _s(12)
-    name_font = _font("Bold", 13)
-    team_font = _font("Regular", 10)
-    draw.text((name_x, row_y0 + _s(8)), driver_name, fill=WHITE, font=name_font)
-    draw.text(
-        (name_x, row_y0 + _s(26)), team_name, fill=(255, 255, 255, 150), font=team_font
-    )
-
-    # Stats on the right side
-    if stats:
-        stat_x = x1 - _s(16)
-        label_font = _font("Regular", 8)
-        value_font = _font("SemiBold", 12)
-        for i, (label, value) in enumerate(reversed(stats)):
-            if stat_col_widths is not None:
-                col_w = stat_col_widths[len(stats) - 1 - i]
-            else:
-                vbbox = draw.textbbox((0, 0), value, font=value_font)
-                lbbox = draw.textbbox((0, 0), label, font=label_font)
-                col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
-            draw.text(
-                (stat_x - col_w, row_y0 + _s(8)),
-                label,
-                fill=(255, 255, 255, 130),
-                font=label_font,
-            )
-            val_col = RED_ACCENT if label == "PTS" and pos is not None and pos <= 3 else WHITE
-            draw.text(
-                (stat_x - col_w, row_y0 + _s(22)),
-                value,
-                fill=val_col,
-                font=value_font,
-            )
-            stat_x -= col_w + _s(16)
-
-    return row_y1 + ROW_MARGIN_Y
-
-
-def _draw_constructor_row(
-    img: Image.Image,
-    draw: ImageDraw.ImageDraw,
-    y: int,
-    pos: int,
-    constructor_name: str,
-    team_colour: tuple[int, int, int],
-    stats: list[tuple[str, str]] | None = None,
-    stat_col_widths: list[int] | None = None,
-) -> int:
-    """Draw a single constructor row. Returns new y position."""
-    x0 = ROW_MARGIN_X
-    x1 = CARD_W - ROW_MARGIN_X
-    row_y0 = y
-    row_y1 = y + ROW_H
-
-    if pos == 1:
-        bg = (255, 215, 0, 25)
-    elif pos == 2:
-        bg = (192, 192, 192, 20)
-    elif pos == 3:
-        bg = (205, 127, 50, 20)
-    else:
-        bg = (255, 255, 255, 15 if (pos or 0) % 2 == 0 else 10)
-
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ovr_draw = ImageDraw.Draw(overlay)
-    ovr_draw.rounded_rectangle((x0, row_y0, x1, row_y1), radius=ROW_RADIUS, fill=bg)
-    img.alpha_composite(overlay)
-
-    draw.rectangle((x0, row_y0 + _s(6), x0 + TEAM_BAR_W, row_y1 - _s(6)), fill=team_colour)
-
-    # Position
-    pos_font = _font("ExtraBold", 20)
-    draw.text(
-        (x0 + _s(16), row_y0 + (ROW_H - _s(24)) // 2),
-        str(pos),
-        fill=_pos_colour(pos),
-        font=pos_font,
-    )
-
-    # Constructor name
-    name_font = _font("Bold", 14)
-    draw.text(
-        (x0 + _s(56), row_y0 + (ROW_H - _s(18)) // 2),
-        constructor_name,
-        fill=WHITE,
-        font=name_font,
-    )
-
-    # Stats
-    if stats:
-        stat_x = x1 - _s(16)
-        label_font = _font("Regular", 8)
-        value_font = _font("SemiBold", 12)
-        pts_font = _font("ExtraBold", 18)
-        for i, (label, value) in enumerate(reversed(stats)):
-            is_pts = label == "POINTS"
-            vf = pts_font if is_pts else value_font
-            if stat_col_widths is not None:
-                col_w = stat_col_widths[len(stats) - 1 - i]
-            else:
-                vbbox = draw.textbbox((0, 0), value, font=vf)
-                lbbox = draw.textbbox((0, 0), label, font=label_font)
-                col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
-            draw.text(
-                (stat_x - col_w, row_y0 + _s(8)),
-                label,
-                fill=(255, 255, 255, 130),
-                font=label_font,
-            )
-            col = RED_ACCENT if is_pts else WHITE
-            vy = row_y0 + _s(18) if is_pts else row_y0 + _s(22)
-            draw.text((stat_x - col_w, vy), value, fill=col, font=vf)
-            stat_x -= col_w + _s(16)
-
-    return row_y1 + ROW_MARGIN_Y
-
-
-def _calc_stat_col_widths(all_stats: list[list[tuple[str, str]]]) -> list[int]:
-    """Pre-calculate per-column max widths across all rows for aligned stat rendering."""
-    if not all_stats:
-        return []
-    label_font = _font("Regular", 8)
-    value_font = _font("SemiBold", 12)
-    scratch = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    n_cols = max(len(s) for s in all_stats)
-    widths = [0] * n_cols
-    for row_stats in all_stats:
-        for i, (label, value) in enumerate(row_stats):
-            vbbox = scratch.textbbox((0, 0), str(value), font=value_font)
-            lbbox = scratch.textbbox((0, 0), label, font=label_font)
-            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
-            widths[i] = max(widths[i], col_w)
-    return widths
-
-
-def _calc_constructor_stat_col_widths(all_stats: list[list[tuple[str, str]]]) -> list[int]:
-    """Pre-calculate per-column max widths for constructor rows (POINTS uses large font)."""
-    if not all_stats:
-        return []
-    label_font = _font("Regular", 8)
-    value_font = _font("SemiBold", 12)
-    pts_font = _font("ExtraBold", 18)
-    scratch = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    n_cols = max(len(s) for s in all_stats)
-    widths = [0] * n_cols
-    for row_stats in all_stats:
-        for i, (label, value) in enumerate(row_stats):
-            vf = pts_font if label == "POINTS" else value_font
-            vbbox = scratch.textbbox((0, 0), str(value), font=vf)
-            lbbox = scratch.textbbox((0, 0), label, font=label_font)
-            col_w = max(vbbox[2] - vbbox[0], lbbox[2] - lbbox[0]) + _s(8)
-            widths[i] = max(widths[i], col_w)
-    return widths
-
-
-# ── Schedule / next race drawing ───────────────────────────────────────────────
-
-
-async def _draw_schedule_item(
-    img: Image.Image,
-    draw: ImageDraw.ImageDraw,
-    y: int,
-    race: F1RaceWeekend,
-) -> int:
-    """Draw a single schedule item block. Returns new y position."""
-    x0 = ROW_MARGIN_X
-    x1 = CARD_W - ROW_MARGIN_X
-
-    # Collect session times
-    session_slots: list[tuple[F1SessionSlot | None, str]] = [
-        (race.first_practice, "FP1"),
-        (race.sprint_qualifying, "Sprint Quali"),
-        (race.second_practice, "FP2"),
-        (race.sprint, "Sprint"),
-        (race.third_practice, "FP3"),
-        (race.qualifying, "Qualifying"),
-    ]
-    sessions: list[tuple[str, str]] = []
-    for slot, label in session_slots:
-        t = _session_cst(slot)
-        if t:
-            sessions.append((label, f"{t} CST"))
-    race_time = _utc_to_cst(race.date, race.time)
-    sessions.append(("Race", f"{race_time} CST"))
-
-    item_h = _s(44) + len(sessions) * _s(14)
-    row_y1 = y + item_h
-
-    # Background
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ovr_draw = ImageDraw.Draw(overlay)
-    ovr_draw.rounded_rectangle(
-        (x0, y, x1, row_y1), radius=ROW_RADIUS, fill=(255, 255, 255, 12)
-    )
-    img.alpha_composite(overlay)
-
-    # Circuit SVG on the right side
-    circ_size = min(item_h - _s(16), _s(90))
-    circuit_img = _load_circuit_image(race.circuit_id, circ_size)
-    if circuit_img is not None:
-        alpha = circuit_img.split()[3].point(lambda p: int(p * 0.45))
-        circuit_img.putalpha(alpha)
-        cx = x1 - _s(8) - circuit_img.width
-        cy = y + (item_h - circuit_img.height) // 2
-        img.paste(circuit_img, (cx, cy), circuit_img)
-
-    # Red accent bar
-    draw.rectangle((x0, y + _s(6), x0 + TEAM_BAR_W, row_y1 - _s(6)), fill=RED_ACCENT)
-
-    # Round label + sprint badge
-    round_font = _font("Medium", 10)
-    round_text = f"ROUND {race.round}"
-    draw.text((x0 + _s(16), y + _s(8)), round_text, fill=(255, 255, 255, 130), font=round_font)
-
-    if race.is_sprint_weekend:
-        sprint_font = _font("Bold", 8)
-        badge_text = "SPRINT"
-        bb = draw.textbbox((0, 0), badge_text, font=sprint_font)
-        bw = bb[2] - bb[0] + _s(12)
-        bh = bb[3] - bb[1] + _s(6)
-        rbbox = draw.textbbox((0, 0), round_text, font=round_font)
-        badge_x = x0 + _s(16) + rbbox[2] - rbbox[0] + _s(8)
-        draw.rounded_rectangle(
-            (badge_x, y + _s(8), badge_x + bw, y + _s(8) + bh), radius=_s(3), fill=RED_ACCENT
-        )
-        draw.text((badge_x + _s(6), y + _s(10)), badge_text, fill=WHITE, font=sprint_font)
-
-    # Race name with flag image
-    title_font = _font("Bold", 14)
-    await _draw_flagged_text(
-        img,
-        draw,
-        (x0 + _s(16), y + _s(24)),
-        race.country,
-        race.race_name,
-        title_font,
-        WHITE,
-        flag_size=_s(18),
-    )
-
-    # Sessions list
-    session_font = _font("Regular", 10)
-    race_font = _font("SemiBold", 10)
-    sy = y + _s(44)
-    for label, time_str in sessions:
-        is_race = label == "Race"
-        f = race_font if is_race else session_font
-        col = RED_ACCENT if is_race else (255, 255, 255, 180)
-        draw.text((x0 + _s(28), sy), f"{label}: {time_str}", fill=col, font=f)
-        sy += _s(14)
-
-    return row_y1 + ROW_MARGIN_Y + _s(4)
-
-
-# ── Public render functions ────────────────────────────────────────────────────
-
-
-async def render_race_result(race: F1RaceWeekend) -> str:
-    """Render race result as a PNG image. Returns file path."""
-    n = len(race.race_results)
-    img, draw, y = await _create_card(
-        n,
-        race.race_name,
-        f"ROUND {race.round} · RACE RESULT",
-        circuit_id=race.circuit_id,
-        country=race.country,
-    )
-    all_stats = [
-        [("TIME", res.time if res.time else (res.status or "-")), ("LAPS", res.laps), ("PTS", res.points)]
-        for res in race.race_results
-    ]
-    col_widths = _calc_stat_col_widths(all_stats)
-    for res, stats in zip(race.race_results, all_stats):
-        pos = res.position
-        colour = _team_colour(res.team_name)
-        y = await _draw_driver_row(
-            img,
-            draw,
-            y,
-            pos,
-            f"{res.driver_first_name} {res.driver_last_name}",
-            res.team_name,
-            colour,
-            acronym=res.driver_last_name[:3],
-            stats=stats,
-            stat_col_widths=col_widths,
-            headshot_url=res.headshot_url,
-        )
-    _draw_footer(draw, img.height)
-    return _save_image(img)
-
-
-async def render_qualifying_result(race: F1RaceWeekend) -> str:
-    """Render qualifying result as a PNG image. Returns file path."""
-    n = len(race.qualifying_results)
-    img, draw, y = await _create_card(
-        n,
-        race.race_name,
-        f"ROUND {race.round} · QUALIFYING",
-        circuit_id=race.circuit_id,
-        country=race.country,
-    )
-    all_stats = [
-        [("Q1", res.q1), ("Q2", res.q2), ("Q3", res.q3)]
-        for res in race.qualifying_results
-    ]
-    col_widths = _calc_stat_col_widths(all_stats)
-    for res, stats in zip(race.qualifying_results, all_stats):
-        pos = res.position
-        colour = _team_colour(res.team_name)
-        y = await _draw_driver_row(
-            img,
-            draw,
-            y,
-            pos,
-            f"{res.driver_first_name} {res.driver_last_name}",
-            res.team_name,
-            colour,
-            acronym=res.driver_last_name[:3],
-            stats=stats,
-            stat_col_widths=col_widths,
-            headshot_url=res.headshot_url,
-        )
-    _draw_footer(draw, img.height)
-    return _save_image(img)
-
-
-async def render_sprint_result(race: F1RaceWeekend) -> str:
-    """Render sprint result as a PNG image. Returns file path."""
-    n = len(race.sprint_results)
-    img, draw, y = await _create_card(
-        n,
-        race.race_name,
-        f"ROUND {race.round} · SPRINT",
-        circuit_id=race.circuit_id,
-        country=race.country,
-    )
-    all_stats = [
-        [("TIME", res.time if res.time else (res.status or "-")), ("PTS", res.points)]
-        for res in race.sprint_results
-    ]
-    col_widths = _calc_stat_col_widths(all_stats)
-    for res, stats in zip(race.sprint_results, all_stats):
-        pos = res.position
-        colour = _team_colour(res.team_name)
-        y = await _draw_driver_row(
-            img,
-            draw,
-            y,
-            pos,
-            f"{res.driver_first_name} {res.driver_last_name}",
-            res.team_name,
-            colour,
-            acronym=res.driver_last_name[:3],
-            stats=stats,
-            stat_col_widths=col_widths,
-            headshot_url=res.headshot_url,
-        )
-    _draw_footer(draw, img.height)
-    return _save_image(img)
-
-
-async def render_driver_standings(
-    standings: list[JolpicaDriverStanding], limit: int = 10
-) -> str:
-    """Render driver standings as a PNG image. Returns file path."""
-    entries = standings[:limit]
-    img, draw, y = await _create_card(len(entries), "DRIVER STANDINGS", "CHAMPIONSHIP")
-    all_stats = [
-        [("WINS", entry.wins), ("POINTS", entry.points)]
-        for entry in entries
-    ]
-    col_widths = _calc_stat_col_widths(all_stats)
-    for entry, stats in zip(entries, all_stats):
-        pos = entry.pos_int
-        colour = _team_colour(entry.primary_team)
-        y = await _draw_driver_row(
-            img,
-            draw,
-            y,
-            pos,
-            entry.driver.full_name,
-            entry.primary_team,
-            colour,
-            acronym=entry.driver.family_name[:3],
-            stats=stats,
-            stat_col_widths=col_widths,
-        )
-    _draw_footer(draw, img.height)
-    return _save_image(img)
-
-
-async def render_constructor_standings(
-    standings: list[JolpicaConstructorStanding],
-) -> str:
-    """Render constructor standings as a PNG image. Returns file path."""
-    img, draw, y = await _create_card(len(standings), "CONSTRUCTOR STANDINGS", "CHAMPIONSHIP")
-    all_stats = [
-        [("WINS", entry.wins), ("POINTS", entry.points)]
-        for entry in standings
-    ]
-    col_widths = _calc_constructor_stat_col_widths(all_stats)
-    for entry, stats in zip(standings, all_stats):
-        pos = entry.pos_int
-        colour = _team_colour(entry.constructor.name)
-        y = _draw_constructor_row(
-            img, draw, y, pos, entry.constructor.name, colour,
-            stats=stats, stat_col_widths=col_widths,
-        )
-    _draw_footer(draw, img.height)
-    return _save_image(img)
-
-
-async def render_schedule(races: list[F1RaceWeekend], limit: int = 5) -> str:
-    """Render upcoming schedule as a PNG image. Returns file path."""
-    now = datetime.now(timezone.utc)
-    upcoming: list[F1RaceWeekend] = []
-    for race in races:
-        try:
-            dt_utc = datetime.fromisoformat(f"{race.date}T{race.time}")
-            if dt_utc >= now:
-                upcoming.append(race)
-        except (ValueError, TypeError, AttributeError):
-            continue
-    upcoming = upcoming[:limit]
-
-    if not upcoming:
-        img = Image.new("RGBA", (CARD_W, HEADER_H + _s(80)), BG_TOP)
-        draw = ImageDraw.Draw(img)
-        draw.rectangle((0, 0, CARD_W, HEADER_H), fill=HEADER_RED)
-        tf = _font("ExtraBold", 18)
-        draw.text((_s(28), _s(28)), "SCHEDULE", fill=WHITE, font=tf)
-        msg_font = _font("Regular", 14)
-        draw.text(
-            (CARD_W // 2 - _s(100), HEADER_H + _s(24)),
-            "No upcoming races",
-            fill=(255, 255, 255, 130),
-            font=msg_font,
-        )
-        return _save_image(img)
-
-    # Pre-calculate total height
-    total_items_h = 0
-    for race in upcoming:
-        session_slots: list[tuple[F1SessionSlot | None, str]] = [
-            (race.first_practice, "FP1"),
-            (race.sprint_qualifying, "Sprint Quali"),
-            (race.second_practice, "FP2"),
-            (race.sprint, "Sprint"),
-            (race.third_practice, "FP3"),
-            (race.qualifying, "Qualifying"),
+        measure = ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength
+        gap = 18
+        usable_width = table_width - gap * (column_count - 1)
+        natural_widths = []
+        for index, heading in enumerate(columns):
+            cells = [heading, *(row[index] for row in normalized_rows)]
+            widest = max((measure(cell, font=regular) for cell in cells), default=0)
+            natural_widths.append(min(max(76.0, widest + 24), 360.0))
+        width_total = sum(natural_widths)
+        widths = [
+            max(76, int(usable_width * width_value / width_total))
+            for width_value in natural_widths
         ]
-        n_sessions = sum(1 for s, _ in session_slots if s is not None) + 1
-        total_items_h += _s(44) + n_sessions * _s(14) + ROW_MARGIN_Y + _s(4)
+        widths[-1] += usable_width - sum(widths)
 
-    total_h = HEADER_H + _s(8) + total_items_h + FOOTER_H
-    season = upcoming[0].season if upcoming else ""
+        wrapped_rows: list[list[list[str]]] = []
+        row_heights: list[int] = []
+        line_height = 25
+        for row in normalized_rows:
+            wrapped_row = [
+                self._wrap(row[index], regular, widths[index] - 14)
+                for index in range(column_count)
+            ]
+            wrapped_rows.append(wrapped_row)
+            row_heights.append(
+                22 + max(len(lines) for lines in wrapped_row) * line_height
+            )
 
-    img = Image.new("RGBA", (CARD_W, total_h), BG_TOP)
-    draw = ImageDraw.Draw(img)
-    draw.rectangle((0, HEADER_H, CARD_W, total_h), fill=BG_BOT)
-    draw.rectangle((0, 0, CARD_W, HEADER_H), fill=HEADER_RED)
+        header_height = 188
+        column_header_height = 54
+        footer_height = 88
+        table_height = sum(row_heights)
+        card_height = (
+            header_height + column_header_height + table_height + footer_height + 20
+        )
 
-    title_font = _font("ExtraBold", 18)
-    sub_font = _font("Medium", 11)
-    draw.text((_s(28), _s(18)), f"F1 {season}", fill=WHITE, font=title_font)
-    draw.text((_s(28), _s(46)), "UPCOMING SCHEDULE", fill=(255, 255, 255, 220), font=sub_font)
+        image = Image.new("RGB", (_CARD_WIDTH, card_height), "#090C12")
+        draw = ImageDraw.Draw(image)
+        for y in range(card_height):
+            blend = y / max(1, card_height)
+            color = (
+                int(9 + 12 * blend),
+                int(12 + 12 * blend),
+                int(18 + 15 * blend),
+            )
+            draw.line((0, y, _CARD_WIDTH, y), fill=color)
 
-    logo = _load_f1_logo(_s(128))
-    if logo is not None:
-        img.paste(logo, (CARD_W - _s(28) - logo.width, (HEADER_H - logo.height) // 2), logo)
-
-    y = HEADER_H + _s(8)
-    for race in upcoming:
-        y = await _draw_schedule_item(img, draw, y, race)
-
-    _draw_footer(draw, img.height)
-    return _save_image(img)
-
-
-async def render_next_race(race: F1RaceWeekend) -> str:
-    """Render next race weekend timetable as a PNG image. Returns file path."""
-    circuit_name = race.circuit_name
-    locality = race.locality
-    country = race.country
-
-    session_slots: list[tuple[F1SessionSlot | None, str]] = [
-        (race.first_practice, "FP1"),
-        (race.sprint_qualifying, "Sprint Qualifying"),
-        (race.second_practice, "FP2"),
-        (race.sprint, "Sprint Race"),
-        (race.third_practice, "FP3"),
-        (race.qualifying, "Qualifying"),
-    ]
-    sessions: list[tuple[str, str]] = []
-    for slot, label in session_slots:
-        t = _session_cst(slot)
-        if t:
-            sessions.append((label, f"{t} CST"))
-    race_time = _utc_to_cst(race.date, race.time)
-    sessions.append(("Race", f"{race_time} CST"))
-
-    body_h = _s(100) + len(sessions) * _s(20) + FOOTER_H
-    total_h = HEADER_H + body_h
-
-    img = Image.new("RGBA", (CARD_W, total_h), BG_TOP)
-    draw = ImageDraw.Draw(img)
-    draw.rectangle((0, HEADER_H, CARD_W, total_h), fill=BG_BOT)
-    draw.rectangle((0, 0, CARD_W, HEADER_H), fill=HEADER_RED)
-
-    title_font = _font("ExtraBold", 18)
-    sub_font = _font("Medium", 11)
-    await _draw_flagged_text(
-        img, draw, (_s(28), _s(18)), country, race.race_name, title_font, WHITE, flag_size=_s(22)
-    )
-    draw.text(
-        (_s(28), _s(46)),
-        f"ROUND {race.round} · RACE WEEKEND",
-        fill=(255, 255, 255, 220),
-        font=sub_font,
-    )
-
-    # F1 logo + circuit overlay
-    logo = _load_f1_logo(_s(128))
-    if logo is not None:
-        img.paste(logo, (CARD_W - _s(28) - logo.width, (HEADER_H - logo.height) // 2), logo)
-    circuit_img = _load_circuit_image(race.circuit_id, _s(56))
-    if circuit_img is not None:
-        alpha = circuit_img.split()[3].point(lambda p: int(p * 0.3))
-        circuit_img.putalpha(alpha)
-        cx = CARD_W - _s(180) - circuit_img.width
-        cy = (HEADER_H - circuit_img.height) // 2
-        img.paste(circuit_img, (cx, cy), circuit_img)
-
-    y = HEADER_H + _s(16)
-
-    # Round + sprint badge
-    round_font = _font("Medium", 10)
-    round_text = f"ROUND {race.round}"
-    draw.text((_s(24), y), round_text, fill=(255, 255, 255, 130), font=round_font)
-    if race.is_sprint_weekend:
-        sprint_font = _font("Bold", 8)
-        bb = draw.textbbox((0, 0), "SPRINT WEEKEND", font=sprint_font)
-        bw = bb[2] - bb[0] + _s(12)
-        bh = bb[3] - bb[1] + _s(6)
-        rbbox = draw.textbbox((0, 0), round_text, font=round_font)
-        badge_x = _s(24) + rbbox[2] - rbbox[0] + _s(8)
+        draw.rectangle((0, 0, _CARD_WIDTH, 9), fill="#E1062C")
+        draw.rectangle((_MARGIN, 32, _MARGIN + 8, 146), fill="#E1062C")
         draw.rounded_rectangle(
-            (badge_x, y, badge_x + bw, y + bh), radius=_s(3), fill=RED_ACCENT
+            (_MARGIN + 28, 38, _MARGIN + 132, 142),
+            radius=18,
+            fill="#E1062C",
         )
-        draw.text((badge_x + _s(6), y + _s(2)), "SPRINT WEEKEND", fill=WHITE, font=sprint_font)
-    y += _s(18)
-
-    # Race name big
-    big_font = _font("ExtraBold", 20)
-    await _draw_flagged_text(
-        img, draw, (_s(24), y), country, race.race_name, big_font, WHITE, flag_size=_s(24)
-    )
-    y += _s(28)
-
-    # Circuit info
-    info_font = _font("Regular", 11)
-    draw.text(
-        (_s(24), y),
-        f"{circuit_name} · {locality}, {country}",
-        fill=(255, 255, 255, 160),
-        font=info_font,
-    )
-    y += _s(24)
-
-    # Section title
-    section_font = _font("SemiBold", 11)
-    draw.text((_s(24), y), "SCHEDULE (CST)", fill=RED_ACCENT, font=section_font)
-    y += _s(20)
-
-    # Sessions
-    session_font = _font("Regular", 11)
-    race_session_font = _font("SemiBold", 11)
-    for label, time_str in sessions:
-        is_race = label == "Race"
-        f = race_session_font if is_race else session_font
-        col = RED_ACCENT if is_race else (255, 255, 255, 180)
-        draw.text((_s(36), y), f"{label}: {time_str}", fill=col, font=f)
-        y += _s(20)
-
-    _draw_footer(draw, img.height)
-    return _save_image(img)
-
-
-async def render_practice_result(
-    session: OpenF1Session,
-    results: list[OpenF1SessionResult],
-    drivers_by_number: dict[int, OpenF1Driver],
-    fp_number: str = "1",
-    circuit_id: str = "",
-) -> str:
-    """Render practice result as a PNG image. Returns file path."""
-    circuit = session.circuit_short_name or session.location
-    n = len(results)
-    img, draw, y = await _create_card(
-        n,
-        circuit,
-        f"FREE PRACTICE {fp_number} · RESULTS",
-        circuit_id=circuit_id,
-        country=session.country_name,
-    )
-    rows: list[tuple] = []
-    for entry in results:
-        drv = drivers_by_number.get(
-            entry.driver_number, OpenF1Driver(driver_number=entry.driver_number)
+        draw.text(
+            (_MARGIN + 47, 63),
+            "F1",
+            font=self._load_font(42, bold=True),
+            fill="#FFFFFF",
         )
-        colour = _parse_openf1_team_colour(drv) or _team_colour(drv.team_name or "")
-        lap_time = _format_lap_duration(entry.duration) if entry.duration else "-"
-        gap_str = ""
-        if isinstance(entry.gap_to_leader, (int, float)) and entry.gap_to_leader > 0:
-            gap_str = f"+{entry.gap_to_leader:.3f}s"
-        stats = [("BEST LAP", lap_time), ("GAP", gap_str or "LEADER")]
-        rows.append((entry.position, drv, colour, stats))
-    col_widths = _calc_stat_col_widths([r[3] for r in rows])
-    for pos, drv, colour, stats in rows:
-        y = await _draw_driver_row(
-            img,
-            draw,
-            y,
-            pos,
-            drv.display_name,
-            drv.team_name or "",
-            colour,
-            acronym=drv.name_acronym or (drv.last_name or "?")[:3],
-            stats=stats,
-            stat_col_widths=col_widths,
-            headshot_url=drv.headshot_url,
+        title = self._ellipsize(table.title or "F1 信息", title_font, 620)
+        draw.text((_MARGIN + 158, 50), title, font=title_font, fill="#FFFFFF")
+        subtitle = self._ellipsize(table.subtitle, subtitle_font, 620)
+        if subtitle:
+            draw.text(
+                (_MARGIN + 160, 104),
+                subtitle,
+                font=subtitle_font,
+                fill="#AEB6C5",
+            )
+        draw.text(
+            (_MARGIN + 160, 139),
+            "F1 赛事信息卡",
+            font=self._load_font(13, bold=True),
+            fill="#E1062C",
         )
-    _draw_footer(draw, img.height)
-    return _save_image(img)
 
+        graphic = self._circuit_graphic(table.circuit_id, (240, 132))
+        graphic_x = _CARD_WIDTH - _MARGIN - 240
+        if graphic is not None:
+            image.paste(graphic, (graphic_x, 34), graphic)
+        else:
+            draw.rounded_rectangle(
+                (graphic_x, 34, graphic_x + 240, 166),
+                radius=20,
+                outline="#4A1020",
+                width=2,
+            )
+            draw.ellipse(
+                (graphic_x + 77, 49, graphic_x + 163, 135),
+                outline="#E1062C",
+                width=4,
+            )
+            draw.text(
+                (graphic_x + 92, 70),
+                "F1",
+                font=self._load_font(34, bold=True),
+                fill="#FFFFFF",
+            )
+            draw.text(
+                (graphic_x + 92, 139),
+                "赛道图",
+                font=self._load_font(14, bold=True),
+                fill="#AEB6C5",
+            )
 
-async def render_starting_grid(
-    drivers_by_number: dict[int, OpenF1Driver],
-    grid: list[OpenF1Position],
-    circuit_id: str = "",
-) -> str:
-    """Render starting grid as a PNG image. Returns file path."""
-    n = len(grid)
-    img, draw, y = await _create_card(n, "STARTING GRID", "RACE DAY", circuit_id=circuit_id)
-    for entry in grid:
-        pos = entry.position
-        drv = drivers_by_number.get(
-            entry.driver_number, OpenF1Driver(driver_number=entry.driver_number)
+        header_top = header_height
+        draw.rounded_rectangle(
+            (
+                _MARGIN,
+                header_top,
+                _CARD_WIDTH - _MARGIN,
+                header_top + column_header_height,
+            ),
+            radius=12,
+            fill="#202532",
         )
-        colour = _parse_openf1_team_colour(drv) or _team_colour(drv.team_name or "")
-        y = await _draw_driver_row(
-            img,
-            draw,
-            y,
-            pos,
-            drv.display_name,
-            drv.team_name or "",
-            colour,
-            acronym=drv.name_acronym or (drv.last_name or "?")[:3],
-            headshot_url=drv.headshot_url,
+        x = _MARGIN + 10
+        for index, heading in enumerate(columns):
+            label = self._ellipsize(heading, header_font, widths[index] - 14)
+            draw.text((x, header_top + 16), label, font=header_font, fill="#FFFFFF")
+            x += widths[index] + gap
+
+        y = header_top + column_header_height
+        for row_index, (wrapped_row, row_height) in enumerate(
+            zip(wrapped_rows, row_heights, strict=True)
+        ):
+            background = "#111620" if row_index % 2 == 0 else "#151B27"
+            draw.rounded_rectangle(
+                (_MARGIN, y + 2, _CARD_WIDTH - _MARGIN, y + row_height - 2),
+                radius=8,
+                fill=background,
+            )
+            x = _MARGIN + 10
+            for column_index, lines in enumerate(wrapped_row):
+                text_color = "#F2F5FA"
+                if column_index == 0 and row_index < 3:
+                    text_color = "#FF4058"
+                for line_index, line in enumerate(lines):
+                    draw.text(
+                        (x, y + 10 + line_index * line_height),
+                        line,
+                        font=bold if column_index == 0 else regular,
+                        fill=text_color,
+                    )
+                x += widths[column_index] + gap
+            y += row_height
+
+        footer_top = card_height - footer_height
+        draw.line(
+            (_MARGIN, footer_top, _CARD_WIDTH - _MARGIN, footer_top),
+            fill="#3A4050",
+            width=2,
         )
-    _draw_footer(draw, img.height)
-    return _save_image(img)
-
-
-async def render_weekend_start(race: F1RaceWeekend) -> str:
-    """Render weekend start notification. Returns file path."""
-    return await render_next_race(race)
+        footer = self._ellipsize(table.footer, footer_font, table_width - 180)
+        draw.text((_MARGIN, footer_top + 27), footer, font=footer_font, fill="#AEB6C5")
+        draw.ellipse(
+            (
+                _CARD_WIDTH - _MARGIN - 14,
+                footer_top + 31,
+                _CARD_WIDTH - _MARGIN,
+                footer_top + 45,
+            ),
+            fill="#E1062C",
+        )
+        return image

@@ -1,346 +1,471 @@
-"""AstrBot plugin: F1 Notifier
-
-Pushes F1 race notifications automatically and provides on-demand
-query commands for race information.
-
-Commands (prefix /f1):
-  /f1 schedule           — upcoming race schedule
-  /f1 next               — next race full timetable
-  /f1 result [round]     — race result (default: latest)
-  /f1 qualifying [round] — qualifying result (default: latest)
-  /f1 sprint [round]     — sprint race result
-  /f1 practice [1|2|3]   — practice session fastest laps
-  /f1 standings drivers  — driver championship standings
-  /f1 standings teams    — constructor standings
-  /f1 subscribe          — subscribe to auto notifications
-  /f1 unsubscribe        — unsubscribe from notifications
-"""
+"""AstrBot command and lifecycle integration for F1 Notifier."""
 
 from __future__ import annotations
 
-import asyncio
+import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api import AstrBotConfig
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.star import Context, Star, StarTools
 
-from .src.astrbot_plugin_f1_notifier import api
-from .src.astrbot_plugin_f1_notifier import formatter as fmt
-from .src.astrbot_plugin_f1_notifier import image_renderer as img
-from .src.astrbot_plugin_f1_notifier.models import Failure, Success
+from .src.astrbot_plugin_f1_notifier.api import DataError, F1Client
+from .src.astrbot_plugin_f1_notifier.formatter import (
+    format_table,
+    schedule_table,
+    weekend_table,
+)
+from .src.astrbot_plugin_f1_notifier.image_renderer import ImageRenderer
+from .src.astrbot_plugin_f1_notifier.models import Table
 from .src.astrbot_plugin_f1_notifier.scheduler import F1Scheduler
 
-HELP_TEXT = """🏎 F1 Notifier 指令列表
-
-/f1 schedule           — 近期赛程（最近5场）
-/f1 next               — 下一站完整时间表
-/f1 result [round]     — 正赛结果（默认最近一场）
+logger = logging.getLogger(__name__)
+HELP_TEXT = """F1 Notifier
+/f1 help — 帮助
+/f1 schedule — 未来 5 站赛程
+/f1 next — 下一站完整周末时间表
+/f1 result [round] — 正赛结果，默认最近一站
 /f1 qualifying [round] — 排位赛结果
-/f1 sprint [round]     — 冲刺赛结果
-/f1 practice [1|2|3]   — 练习赛最快圈速（默认FP1）
-/f1 standings drivers  — 车手积分榜
-/f1 standings teams    — 车队积分榜
-/f1 subscribe          — 订阅自动推送
-/f1 unsubscribe        — 取消订阅
+/f1 sprint [round] — 冲刺赛结果
+/f1 practice [1|2|3] — 最近一次指定练习赛结果
+/f1 standings [drivers|teams] — 车手 / 车队积分榜
+/f1 subscribe — 订阅当前会话
+/f1 unsubscribe — 取消当前会话订阅
+/f1 test [season] — 只读检查数据源，默认 2025
 
-自动推送内容：
-  • 比赛周开始提醒（含完整赛程表）
-  • 练习赛最快圈速（FP1/FP2/FP3）
-  • 排位赛结果
-  • 冲刺赛结果（冲刺周末）
-  • 正赛发车前30分钟（含发车顺序）
-  • 正赛结果
+订阅推送：赛前 24 小时周末赛程、各节练习赛 / 排位赛 / 冲刺赛结果、正赛前 30 分钟发车顺序、正赛结果。
+时间默认 Asia/Shanghai。结果在数据源发布后推送，可能延迟。
 """
 
 
-@register(
-    "astrbot_plugin_f1_notifier",
-    "MareDevi",
-    "F1赛事推送与查询插件",
-    "1.1.4",
-    "https://github.com/MareDevi/astrbot_plugin_f1_notifier",
-)
 class F1NotifierPlugin(Star):
+    """Keep AstrBot routing separate from provider and delivery state.
+
+    Args:
+        context: AstrBot runtime context.
+        config: Plugin settings supplied by AstrBot.
+    """
+
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
-        self.config = config
-        self.scheduler = F1Scheduler(self, context, config)
-
-    @property
-    def _image_mode(self) -> bool:
-        return bool(self.config.get("enable_image_render", False))
-
-    async def _render_or_text(
-        self, event: AstrMessageEvent, text: str, image_path: str
-    ):
-        """Yield image result if image mode is on, otherwise plain text."""
-        if self._image_mode:
-            try:
-                return event.image_result(image_path)
-            except Exception as e:
-                logger.warning(
-                    f"[F1Notifier] Image render failed, fallback to text: {e}"
+        self.config = dict(config)
+        self.config.setdefault("timezone", "Asia/Shanghai")
+        try:
+            ZoneInfo(self.config["timezone"])
+        except (ZoneInfoNotFoundError, TypeError) as exc:
+            raise ValueError("Invalid F1 display timezone") from exc
+        for key, default, minimum, maximum in (
+            ("result_poll_delay", 5, 0, 120),
+            ("image_cache_max_age", 30, 1, 1440),
+            ("image_cache_max_count", 50, 1, 200),
+        ):
+            value = self.config.get(key, default)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not minimum <= value <= maximum
+            ):
+                raise ValueError(
+                    f"{key} must be an integer between {minimum} and {maximum}"
                 )
-        return event.plain_result(text)
+            self.config[key] = value
+        self.client = F1Client()
+        self.renderer: ImageRenderer | None = None
+        self.scheduler: F1Scheduler | None = None
+        self._ready = False
 
     async def initialize(self) -> None:
-        """Start the background notification scheduler."""
-        self.scheduler.start()
-        logger.info("[F1Notifier] Plugin initialized.")
+        """Restore subscriptions before starting polling or accepting commands."""
+        if self._ready:
+            return
+        self.renderer = ImageRenderer(
+            StarTools.get_data_dir("astrbot_plugin_f1_notifier") / "images",
+            max_age_minutes=self.config["image_cache_max_age"],
+            max_count=self.config["image_cache_max_count"],
+        )
+        try:
+            await self.client.open()
+            self.scheduler = F1Scheduler(
+                self.client, self.get_kv_data, self.put_kv_data, self._send, self.config
+            )
+            await self.scheduler.initialize()
+            self._ready = True
+            self.scheduler.start()
+        except BaseException:
+            await self.client.close()
+            await self.renderer.close()
+            raise
+        logger.info(
+            "F1 notifier initialized with %s subscribers",
+            self.scheduler.subscriber_count,
+        )
 
     async def terminate(self) -> None:
-        """Stop the scheduler and close HTTP session."""
-        await self.scheduler.stop()
-        await api.close_session()
-        logger.info("[F1Notifier] Plugin terminated.")
+        """Await polling and rendering before releasing owned resources."""
+        self._ready = False
+        try:
+            if self.scheduler is not None:
+                await self.scheduler.stop()
+        finally:
+            await self.client.close()
+            if self.renderer is not None:
+                await self.renderer.close()
 
-    # ──────────────────── command_group ────────────────────────────
+    async def _send(self, origin: str, table: Table) -> bool:
+        """Deliver one notification with a text fallback for image failures.
+
+        Args:
+            origin: AstrBot unified message origin.
+            table: Shared notification content.
+
+        Returns:
+            Whether AstrBot found a platform and completed the send operation.
+        """
+        text = format_table(table)
+        if self.config.get("enable_image_render") and self.renderer is not None:
+            try:
+                image = await self.renderer.render(table)
+                return bool(
+                    await self.context.send_message(
+                        origin, MessageChain().file_image(str(image))
+                    )
+                )
+            except Exception:
+                logger.exception("F1 image delivery failed; falling back to text")
+        return bool(
+            await self.context.send_message(origin, MessageChain().message(text))
+        )
+
+    async def _reply(
+        self, event: AstrMessageEvent, action: str, argument: str = "last"
+    ):
+        """Validate a query and render its result using the selected output mode.
+
+        Args:
+            event: Triggering message event.
+            action: Query or subscription operation.
+            argument: Optional command-specific user argument.
+
+        Yields:
+            An AstrBot text or image message result.
+        """
+        if not self._ready:
+            yield event.plain_result("插件尚未就绪，请稍后重试。")
+            return
+        try:
+            now = datetime.now(timezone.utc)
+            if action in ("subscribe", "unsubscribe"):
+                if action == "subscribe":
+                    added = await self.scheduler.subscribe(event.unified_msg_origin)
+                    text = (
+                        "订阅成功，将推送本会话订阅后的比赛通知。"
+                        if added
+                        else "当前会话已订阅。"
+                    )
+                else:
+                    removed = await self.scheduler.unsubscribe(event.unified_msg_origin)
+                    text = "已取消当前会话订阅。" if removed else "当前会话尚未订阅。"
+                yield event.plain_result(text)
+                return
+            if action == "standings":
+                category = {
+                    "driver": "drivers",
+                    "drivers": "drivers",
+                    "team": "teams",
+                    "teams": "teams",
+                }.get(argument.lower())
+                if category is None:
+                    yield event.plain_result(
+                        "用法：/f1 standings drivers 或 /f1 standings teams"
+                    )
+                    return
+                table = await self.client.standings(now.year, category)
+            else:
+                kind = action
+                if action == "practice":
+                    number = argument.lower().removeprefix("fp")
+                    if number not in ("1", "2", "3"):
+                        yield event.plain_result("用法：/f1 practice [1|2|3]")
+                        return
+                    kind = f"practice{number}"
+                    argument = "last"
+                elif action in ("race", "qualifying", "sprint") and argument != "last":
+                    if (
+                        not argument.isascii()
+                        or not argument.isdecimal()
+                        or not 1 <= int(argument) <= 99
+                    ):
+                        yield event.plain_result(
+                            "站次必须是 1 到 99 的正整数，例如 /f1 result 2。"
+                        )
+                        return
+                races = await self.client.schedule(now.year)
+                if action in ("schedule", "next"):
+                    upcoming = [race for race in races if race.start > now]
+                    if len(upcoming) < (5 if action == "schedule" else 1):
+                        try:
+                            upcoming.extend(await self.client.schedule(now.year + 1))
+                        except DataError:
+                            if not upcoming:
+                                raise
+                    table = (
+                        schedule_table(upcoming[:5], self.config["timezone"])
+                        if action == "schedule" and upcoming
+                        else weekend_table(upcoming[0], self.config["timezone"])
+                        if upcoming
+                        else None
+                    )
+                else:
+                    if argument != "last":
+                        race = next(
+                            (r for r in races if r.round == int(argument)), None
+                        )
+                    else:
+                        candidates = [
+                            (s.start, r)
+                            for r in races
+                            for s in r.sessions
+                            if s.key == kind and s.start <= now
+                        ]
+                        if not candidates:
+                            races = await self.client.schedule(now.year - 1)
+                            candidates = [
+                                (s.start, r)
+                                for r in races
+                                for s in r.sessions
+                                if s.key == kind and s.start <= now
+                            ]
+                        race = (
+                            max(candidates, key=lambda item: item[0])[1]
+                            if candidates
+                            else None
+                        )
+                    table = (
+                        await self.client.results(race, kind)
+                        if race is not None
+                        else None
+                    )
+            if table is None:
+                yield event.plain_result(
+                    "暂无已发布数据。赛程或结果可能尚未公布，请稍后重试。"
+                )
+                return
+            if self.config.get("enable_image_render"):
+                try:
+                    image = await self.renderer.render(table)
+                    yield event.image_result(str(image))
+                    return
+                except Exception:
+                    logger.exception("F1 card rendering failed; falling back to text")
+            yield event.plain_result(format_table(table))
+        except DataError as exc:
+            yield event.plain_result(str(exc))
+        except Exception:
+            logger.exception("F1 command %s failed", action)
+            yield event.plain_result("查询失败，订阅与推送状态未丢失。请稍后重试。")
+
     @filter.command_group("f1")
-    def f1(self) -> None:
-        """F1赛事查询与推送"""
-
-    # ──────────────────── sub-commands ─────────────────────────────
+    def f1(self):
+        """Query F1 information and manage this conversation's subscription."""
 
     @f1.command("help")
     async def f1_help(self, event: AstrMessageEvent):
-        """显示帮助信息"""
+        """Show available commands.
+
+        Args:
+            event: Triggering message.
+
+        Yields:
+            Command help.
+        """
         yield event.plain_result(HELP_TEXT)
 
     @f1.command("schedule")
     async def f1_schedule(self, event: AstrMessageEvent):
-        """查看近期赛程（最近5站）"""
-        result = await api.get_current_schedule()
-        match result:
-            case Success(value=races):
-                text = fmt.format_schedule(races)
-                image_path = await img.render_schedule(races)
-                yield await self._render_or_text(event, text, image_path)
-            case Failure(error=err):
-                logger.error(f"[F1Notifier] /f1 schedule error: {err}")
-                yield event.plain_result("❌ 获取赛程失败，请稍后重试。")
+        """Show the next five races.
+
+        Args:
+            event: Triggering message.
+
+        Yields:
+            Schedule query result.
+        """
+        async for result in self._reply(event, "schedule"):
+            yield result
 
     @f1.command("next")
     async def f1_next(self, event: AstrMessageEvent):
-        """查看下一站完整时间表"""
-        result = await api.get_current_schedule()
-        match result:
-            case Success(value=races):
-                now = datetime.now(timezone.utc)
-                next_race = None
-                for race in races:
-                    dt = fmt.race_utc(race)
-                    if dt is not None and dt >= now:
-                        next_race = race
-                        break
-                if next_race is None:
-                    yield event.plain_result(
-                        "📅 本赛季剩余赛程已全部完成，期待下赛季！"
-                    )
-                else:
-                    text = fmt.format_next_race(next_race)
-                    image_path = await img.render_next_race(next_race)
-                    yield await self._render_or_text(event, text, image_path)
-            case Failure(error=err):
-                logger.error(f"[F1Notifier] /f1 next error: {err}")
-                yield event.plain_result("❌ 获取下一站信息失败，请稍后重试。")
+        """Show the next race weekend.
+
+        Args:
+            event: Triggering message.
+
+        Yields:
+            Full weekend timetable.
+        """
+        async for result in self._reply(event, "next"):
+            yield result
 
     @f1.command("result")
     async def f1_result(self, event: AstrMessageEvent, round_num: str = "last"):
-        """查看正赛结果，可指定站次 round"""
-        round_arg: int | str = int(round_num) if round_num.isdigit() else "last"
-        result = await api.get_race_result(round_arg)
-        match result:
-            case Success(value=race) if race.race_results:
-                text = fmt.format_race_result(race)
-                image_path = await img.render_race_result(race)
-                yield await self._render_or_text(event, text, image_path)
-            case Success():
-                yield event.plain_result("⏳ 正赛结果暂未公布，请比赛结束后再试。")
-            case Failure(error=err):
-                logger.error(f"[F1Notifier] /f1 result error: {err}")
-                yield event.plain_result("❌ 获取比赛结果失败，请稍后重试。")
+        """Show race classification.
+
+        Args:
+            event: Triggering message.
+            round_num: Current-season round or last.
+
+        Yields:
+            Published classification or a pending-data message.
+        """
+        async for result in self._reply(event, "race", round_num):
+            yield result
 
     @f1.command("qualifying")
     async def f1_qualifying(self, event: AstrMessageEvent, round_num: str = "last"):
-        """查看排位赛结果，可指定站次 round"""
-        round_arg: int | str = int(round_num) if round_num.isdigit() else "last"
-        result = await api.get_qualifying_result(round_arg)
-        match result:
-            case Success(value=race) if race.qualifying_results:
-                text = fmt.format_qualifying_result(race)
-                image_path = await img.render_qualifying_result(race)
-                yield await self._render_or_text(event, text, image_path)
-            case Success():
-                yield event.plain_result("⏳ 排位赛结果暂未公布，请稍后再试。")
-            case Failure(error=err):
-                logger.error(f"[F1Notifier] /f1 qualifying error: {err}")
-                yield event.plain_result("❌ 获取排位赛结果失败，请稍后重试。")
+        """Show qualifying classification.
+
+        Args:
+            event: Triggering message.
+            round_num: Current-season round or last.
+
+        Yields:
+            Published qualifying times.
+        """
+        async for result in self._reply(event, "qualifying", round_num):
+            yield result
 
     @f1.command("sprint")
     async def f1_sprint(self, event: AstrMessageEvent, round_num: str = "last"):
-        """查看冲刺赛结果，可指定站次 round"""
-        round_arg: int | str = int(round_num) if round_num.isdigit() else "last"
-        result = await api.get_sprint_result(round_arg)
-        match result:
-            case Success(value=race) if race.sprint_results:
-                text = fmt.format_sprint_result(race)
-                image_path = await img.render_sprint_result(race)
-                yield await self._render_or_text(event, text, image_path)
-            case Success():
-                yield event.plain_result("⏳ 冲刺赛结果暂未公布，或该站无冲刺赛。")
-            case Failure(error=err):
-                logger.error(f"[F1Notifier] /f1 sprint error: {err}")
-                yield event.plain_result("❌ 获取冲刺赛结果失败，请稍后重试。")
+        """Show sprint classification.
+
+        Args:
+            event: Triggering message.
+            round_num: Current-season round or last.
+
+        Yields:
+            Published sprint results.
+        """
+        async for result in self._reply(event, "sprint", round_num):
+            yield result
 
     @f1.command("practice")
     async def f1_practice(self, event: AstrMessageEvent, session: str = "1"):
-        """查看练习赛最快圈速。session: 1/2/3（默认1，也可输入 fp1/fp2/fp3）"""
-        normalized = session.lower().removeprefix("fp") or "1"
-        if normalized not in ("1", "2", "3"):
-            yield event.plain_result(
-                "❌ 请输入有效的练习赛场次：1、2、或 3（如 /f1 practice 2）"
-            )
-            return
+        """Show the latest selected practice classification.
 
-        session_result = await api.get_practice_session(normalized)
-        match session_result:
-            case Failure(error=err):
-                logger.warning(f"[F1Notifier] /f1 practice session lookup: {err}")
-                yield event.plain_result(
-                    f"⏳ 暂未找到 FP{normalized} 练习赛数据，请练习赛结束后再试。"
-                )
-                return
-            case Success(value=of1_session):
-                sk = of1_session.session_key
-                results_result, drivers_result = await asyncio.gather(
-                    api.get_session_result(sk),
-                    api.get_drivers_for_session(sk),
-                )
-                match (results_result, drivers_result):
-                    case (Success(value=results), Success(value=drivers_list)) if (
-                        results
-                    ):
-                        drivers_by_num = {d.driver_number: d for d in drivers_list}
-                        text = fmt.format_practice_result(
-                            of1_session, results, drivers_by_num, normalized
-                        )
-                        image_path = await img.render_practice_result(
-                            of1_session, results, drivers_by_num, normalized
-                        )
-                        yield await self._render_or_text(event, text, image_path)
-                    case (Success(), Failure(error=err)):
-                        logger.error(f"[F1Notifier] /f1 practice drivers error: {err}")
-                        yield event.plain_result(
-                            "❌ 获取练习赛车手数据失败，请稍后重试。"
-                        )
-                    case (Success(), _):
-                        yield event.plain_result(
-                            f"⏳ FP{normalized} 结果数据暂未就绪，请练习赛结束后再试。"
-                        )
-                    case (Failure(error=err), _):
-                        logger.error(f"[F1Notifier] /f1 practice error: {err}")
-                        yield event.plain_result("❌ 获取练习赛数据失败，请稍后重试。")
+        Args:
+            event: Triggering message.
+            session: Practice number, optionally prefixed by FP.
+
+        Yields:
+            Published practice results.
+        """
+        async for result in self._reply(event, "practice", session):
+            yield result
 
     @f1.command("standings")
     async def f1_standings(self, event: AstrMessageEvent, category: str = "drivers"):
-        """查看积分榜。category: drivers（默认）或 teams"""
-        match category.lower():
-            case "teams" | "constructors" | "team" | "车队":
-                result = await api.get_constructor_standings()
-                match result:
-                    case Success(value=standings):
-                        text = fmt.format_constructor_standings(standings)
-                        image_path = await img.render_constructor_standings(standings)
-                        yield await self._render_or_text(event, text, image_path)
-                    case Failure(error=err):
-                        logger.error(f"[F1Notifier] /f1 standings teams error: {err}")
-                        yield event.plain_result("❌ 获取车队积分榜失败，请稍后重试。")
-            case _:
-                result = await api.get_driver_standings()
-                match result:
-                    case Success(value=standings):
-                        text = fmt.format_driver_standings(standings)
-                        image_path = await img.render_driver_standings(standings)
-                        yield await self._render_or_text(event, text, image_path)
-                    case Failure(error=err):
-                        logger.error(f"[F1Notifier] /f1 standings drivers error: {err}")
-                        yield event.plain_result("❌ 获取车手积分榜失败，请稍后重试。")
+        """Show current-season championship standings.
+
+        Args:
+            event: Triggering message.
+            category: drivers or teams.
+
+        Yields:
+            Championship standings.
+        """
+        async for result in self._reply(event, "standings", category):
+            yield result
 
     @f1.command("subscribe")
     async def f1_subscribe(self, event: AstrMessageEvent):
-        """订阅当前会话的自动推送"""
-        session = event.unified_msg_origin
-        added = await self.scheduler.add_subscriber(session)
-        if added:
-            yield event.plain_result(
-                f"✅ 已订阅 F1 自动推送！\n"
-                f"当前共 {self.scheduler.subscriber_count()} 个会话已订阅。\n"
-                "将自动推送：赛程提醒、排位/冲刺赛结果、发车顺序、正赛结果。"
-            )
-        else:
-            yield event.plain_result(
-                "ℹ️ 当前会话已经订阅过了。发送 /f1 unsubscribe 可以取消。"
-            )
+        """Subscribe the current conversation.
+
+        Args:
+            event: Triggering message.
+
+        Yields:
+            Subscription status.
+        """
+        async for result in self._reply(event, "subscribe"):
+            yield result
 
     @f1.command("unsubscribe")
     async def f1_unsubscribe(self, event: AstrMessageEvent):
-        """取消当前会话的自动推送"""
-        session = event.unified_msg_origin
-        removed = await self.scheduler.remove_subscriber(session)
-        if removed:
-            yield event.plain_result("✅ 已取消订阅 F1 自动推送。")
-        else:
-            yield event.plain_result(
-                "ℹ️ 当前会话尚未订阅。发送 /f1 subscribe 可以订阅。"
-            )
+        """Unsubscribe the current conversation.
+
+        Args:
+            event: Triggering message.
+
+        Yields:
+            Subscription status.
+        """
+        async for result in self._reply(event, "unsubscribe"):
+            yield result
 
     @f1.command("test")
     async def f1_test(self, event: AstrMessageEvent, season: str = "2025"):
-        """测试插件各项查询功能，指定赛季（默认2025）"""
-        yr = int(season) if season.isdigit() else 2025
-        yield event.plain_result(f"🔧 正在测试 {yr} 赛季数据，请稍候...")
+        """Check providers without changing subscriptions or delivery state.
 
-        async def run(name: str, coro) -> tuple[str, bool, str]:
-            r = await coro
-            match r:
-                case Success(value=val):
-                    match val:
-                        case [*items]:
-                            return (name, True, f"✅ {len(items)} 条记录")
-                        case obj:
-                            label = getattr(obj, "race_name", None) or getattr(
-                                obj, "driver", None
-                            )
-                            detail = f"✅ {label}" if label else "✅"
-                            return (name, True, detail)
-                case Failure(error=err):
-                    return (name, False, f"❌ {err}")
-            return (name, False, "❌ unknown")
+        Args:
+            event: Triggering message.
+            season: Historical or current championship year.
 
-        async def _fp_test():
-            s = await api.get_practice_session("1", yr)
-            match s:
-                case Success(value=session):
-                    return await api.get_session_result(session.session_key)
-                case Failure() as f:
-                    return f
-
-        results: list[tuple[str, bool, str]] = list(
-            await asyncio.gather(
-                run("赛程", api.get_current_schedule(yr)),
-                run("正赛结果(R1)", api.get_race_result(1, yr)),
-                run("排位(R1)", api.get_qualifying_result(1, yr)),
-                run("冲刺(R5)", api.get_sprint_result(5, yr)),
-                run("车手积分", api.get_driver_standings(yr)),
-                run("车队积分", api.get_constructor_standings(yr)),
-                run("练习赛(FP1)", _fp_test()),
-            )
-        )
-
-        lines = [f"📋 F1 插件测试报告 ({yr} 赛季)\n"]
-        passed = sum(1 for _, ok, _ in results if ok)
-        for name, ok, detail in results:
-            lines.append(f"  {'✅' if ok else '❌'} {name}: {detail}")
-        lines.append(f"\n共 {passed}/{len(results)} 项通过")
-        yield event.plain_result("\n".join(lines))
+        Yields:
+            Provider checks, including unavailable endpoints.
+        """
+        if not self._ready:
+            yield event.plain_result("插件尚未就绪，请稍后重试。")
+            return
+        if (
+            not season.isascii()
+            or not season.isdecimal()
+            or not 1950 <= int(season) <= datetime.now(timezone.utc).year + 1
+        ):
+            yield event.plain_result("赛季必须是 1950 到明年之间的四位年份。")
+            return
+        try:
+            races = await self.client.schedule(int(season))
+            yield event.plain_result(f"{season} 赛程：{len(races)} 站")
+            if not races:
+                return
+            for kind in ("race", "qualifying", "sprint", "practice1", "grid"):
+                race = next(
+                    (
+                        r
+                        for r in reversed(races)
+                        if any(
+                            s.key == ("race" if kind == "grid" else kind)
+                            and s.start <= datetime.now(timezone.utc)
+                            for s in r.sessions
+                        )
+                    ),
+                    None,
+                )
+                if race is None:
+                    yield event.plain_result(f"{kind}：暂无场次")
+                    continue
+                try:
+                    table = await self.client.results(race, kind)
+                    yield event.plain_result(
+                        f"{kind}：{len(table.rows)} 条记录"
+                        if table
+                        else f"{kind}：暂无已发布数据"
+                    )
+                except DataError as exc:
+                    yield event.plain_result(f"{kind}：{exc}")
+            for category in ("drivers", "teams"):
+                try:
+                    table = await self.client.standings(int(season), category)
+                    yield event.plain_result(
+                        f"{category}：{len(table.rows)} 条记录"
+                        if table
+                        else f"{category}：暂无已发布数据"
+                    )
+                except DataError as exc:
+                    yield event.plain_result(f"{category}：{exc}")
+        except DataError as exc:
+            yield event.plain_result(str(exc))
+        except Exception:
+            logger.exception("F1 diagnostic command failed")
+            yield event.plain_result("数据源检查失败，请查看插件日志。")

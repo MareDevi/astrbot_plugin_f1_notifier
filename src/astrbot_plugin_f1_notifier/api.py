@@ -33,6 +33,10 @@ class DataError(Exception):
     """A data provider is temporarily unavailable or returned invalid data."""
 
 
+class RateLimitError(DataError):
+    """A provider is rate limited; the HTTP layer already logged the episode."""
+
+
 class F1Client:
     """Own the HTTP session, cache, and request budget for one plugin instance.
 
@@ -97,7 +101,7 @@ class F1Client:
                 self._cache.move_to_end(key)
                 return cached[1]
             if self._retry_at.get(base, 0) > now:
-                raise DataError("数据源限流，请稍后重试。")
+                raise RateLimitError("数据源限流，请稍后重试。")
             await asyncio.sleep(max(0, self._next_request.get(base, 0) - now))
             if self._session is None or self._session.closed:
                 raise DataError("数据客户端尚未就绪，请稍后重试。")
@@ -125,14 +129,22 @@ class F1Client:
                                 delay = 60
                         if not math.isfinite(delay):
                             delay = 60
+                        if base not in self._retry_at:
+                            logger.warning(
+                                "F1 provider %s returned HTTP 429; cooling down for %.1f seconds",
+                                base,
+                                max(1, delay),
+                            )
                         self._retry_at[base] = time.monotonic() + max(1, delay)
-                        raise DataError("数据源限流，请稍后重试。")
+                        raise RateLimitError("数据源限流，请稍后重试。")
                     response.raise_for_status()
                     data = await response.json()
                     if not isinstance(data, (dict, list)):
                         raise DataError("数据源返回了无效内容，请稍后重试。")
             except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
                 raise DataError("数据源暂时不可用，请稍后重试。") from exc
+            # Keep the marker through repeated 429s; only a successful request resets it.
+            self._retry_at.pop(base, None)
             if data and ttl > 0:
                 self._cache[key] = (time.monotonic() + ttl, data)
                 self._cache.move_to_end(key)
@@ -176,6 +188,8 @@ class F1Client:
                 timings = await self._get(
                     self.openf1_base, "/sessions", {"year": season}, ttl=300
                 )
+            except RateLimitError:
+                timings = []
             except DataError:
                 logger.warning("OpenF1 timing unavailable; keeping published schedule")
                 timings = []

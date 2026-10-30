@@ -6,10 +6,23 @@
     "default": false
   },
   "timezone": {
-    "description": "显示时区",
+    "description": "显示与周末赛程推送时区",
     "type": "string",
-    "hint": "IANA 时区名称，例如 Asia/Shanghai、Europe/London。仅影响显示，调度统一使用 UTC。",
+    "hint": "IANA 时区名称，例如 Asia/Shanghai、Europe/London。用于显示时间及计算周末赛程推送时间，调度统一使用 UTC。",
     "default": "Asia/Shanghai"
+  },
+  "weekend_push_day": {
+    "description": "周末赛程推送星期",
+    "type": "string",
+    "options": ["周一", "周二", "周三"],
+    "hint": "在首场场次所在周的所选星期推送完整周末赛程。仅比赛周推送，按配置时区计算。",
+    "default": "周一"
+  },
+  "weekend_push_time": {
+    "description": "周末赛程推送时间",
+    "type": "string",
+    "hint": "24 小时制 HH:MM，例如 09:00 或 20:30，按配置时区计算。错过时间时会在首场场次开始前补发一次。保存后重载插件生效。",
+    "default": "09:00"
   },
   "result_poll_delay": {
     "description": "结果轮询延迟（分钟）",

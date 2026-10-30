@@ -141,3 +141,21 @@ async def test_schedule_queries_next_year_during_offseason(plugin):
     plugin.client.schedule = AsyncMock(side_effect=[[], [future]])
     replies = [r async for r in plugin.f1_next(Event())]
     assert "Next season" in replies[0]
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"weekend_push_day": "周四"},
+        {"weekend_push_day": 1},
+        {"weekend_push_time": "24:00"},
+        {"weekend_push_time": "09:60"},
+        {"weekend_push_time": "9:00"},
+        {"weekend_push_time": "09:00:00"},
+        {"weekend_push_time": "０９:００"},
+        {"weekend_push_time": None},
+    ],
+)
+def test_invalid_weekend_reminder_settings_rejected(module, settings):
+    with pytest.raises(ValueError, match="weekend_push_"):
+        module.F1NotifierPlugin(AsyncMock(), settings)

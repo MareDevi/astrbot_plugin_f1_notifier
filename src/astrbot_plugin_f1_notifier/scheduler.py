@@ -6,9 +6,10 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from .api import F1Client
+from .api import F1Client, RateLimitError
 from .models import Race, Table, parse_datetime
 
 logger = logging.getLogger(__name__)
@@ -197,11 +198,17 @@ class F1Scheduler:
             return
         now = now or datetime.now(timezone.utc)
         async with self._tick_lock:
-            seasons = {now.year, (now - timedelta(hours=48)).year}
+            seasons = {
+                now.year,
+                (now - timedelta(hours=48)).year,
+                (now + timedelta(days=7)).year,
+            }
             races = []
             for season in sorted(seasons):
                 try:
                     races.extend(await self.client.schedule(season))
+                except RateLimitError:
+                    continue
                 except Exception:
                     logger.exception("F1 schedule unavailable for season %s", season)
             async with self._lock:
@@ -250,6 +257,8 @@ class F1Scheduler:
                             table = await self.client.results(race, kind)
                         if table is not None:
                             await self._deliver(event, expires, recipients, table)
+                    except RateLimitError:
+                        continue
                     except Exception:
                         logger.exception(
                             "F1 event %s failed; retaining pending recipients", event
@@ -265,8 +274,23 @@ class F1Scheduler:
             Event kind, eligible time, expiry, and source session start tuples.
         """
         first = min(s.start for s in race.sessions)
+        local_first = first.astimezone(
+            ZoneInfo(self.config.get("timezone", "Asia/Shanghai"))
+        )
+        # Anchor to the first session's local week, even if the race ends on Monday.
+        reminder_date = local_first.date() + timedelta(
+            days=("周一", "周二", "周三").index(
+                self.config.get("weekend_push_day", "周一")
+            )
+            - local_first.weekday()
+        )
+        reminder = datetime.combine(
+            reminder_date,
+            time.fromisoformat(self.config.get("weekend_push_time", "09:00")),
+            tzinfo=local_first.tzinfo,
+        ).astimezone(timezone.utc)
         events = [
-            ("weekend", first - timedelta(hours=24), first, first),
+            ("weekend", reminder, first, first),
             ("grid", race.start - timedelta(minutes=30), race.start, race.start),
         ]
         delay = timedelta(minutes=self.config.get("result_poll_delay", 5))

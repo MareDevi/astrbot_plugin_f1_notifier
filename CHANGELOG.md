@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Log HTTP 429 once per provider until a successful response resets the warning; suppress repeated rate-limit exceptions in polling and schedule fallback while retaining retries and other error logs.
+- Replace the fixed reminder 24 hours before the first session with a configurable Monday, Tuesday, or Wednesday time in plugin settings, defaulting to Monday at 09:00.
+- Use the configured timezone and the first session's local calendar week; preserve catch-up until the first session and per-recipient delivery acknowledgements.
+- Load next season's schedule when a reminder week crosses New Year.
+
 ## 2.0.0
 
 - Rebuild the plugin around instance-owned HTTP clients, immutable weekend models, and shared text/image tables.

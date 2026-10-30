@@ -83,15 +83,34 @@ async def test_http_cache_is_per_instance_and_empty_list_is_not_cached(client, s
     assert state["calls"] == 3
 
 
-async def test_rate_limit_sets_cooldown_without_caching_error(client, server):
+async def test_rate_limit_sets_cooldown_without_caching_error(client, server, caplog):
     base, state = server
     state["status"] = 429
     with pytest.raises(api.DataError, match="限流"):
         await client._get(base, "/limited")
+    assert len(caplog.records) == 1
+    assert "429" in caplog.records[0].message
+    assert caplog.records[0].exc_info is None
     state["status"] = 200
+    for _ in range(3):
+        with pytest.raises(api.DataError, match="限流"):
+            await client._get(base, "/limited")
+    assert state["calls"] == 1
+    assert len(caplog.records) == 1
+    # A provider that remains limited after cooldown must not spam new warnings.
+    state["status"] = 429
+    client._retry_at[base] = 0
     with pytest.raises(api.DataError, match="限流"):
         await client._get(base, "/limited")
-    assert state["calls"] == 1
+    assert state["calls"] == 2
+    assert len(caplog.records) == 1
+    state["status"] = 200
+    client._retry_at[base] = 0
+    assert await client._get(base, "/limited") == {"ok": True}
+    state["status"] = 429
+    with pytest.raises(api.DataError, match="限流"):
+        await client._get(base, "/another")
+    assert len(caplog.records) == 2
 
 
 async def test_session_matching_uses_time_and_type_not_latest(client, server):
@@ -292,9 +311,14 @@ async def test_schedule_uses_confirmed_session_end_when_available(client, monkey
     assert race.sessions[0].end == datetime(2026, 3, 15, 9, 5, tzinfo=timezone.utc)
 
 
-async def test_openf1_outage_does_not_hide_jolpica_schedule(client, monkeypatch):
+@pytest.mark.parametrize("limited", [False, True])
+async def test_openf1_outage_does_not_hide_jolpica_schedule(
+    client, monkeypatch, caplog, limited
+):
     async def payload(base, path, params=None, ttl=30):
         if path == "/sessions":
+            if limited:
+                raise api.RateLimitError("数据源限流，请稍后重试。")
             raise api.DataError("unavailable")
         return {
             "MRData": {
@@ -314,6 +338,7 @@ async def test_openf1_outage_does_not_hide_jolpica_schedule(client, monkeypatch)
 
     monkeypatch.setattr(client, "_get", payload)
     assert (await client.schedule(2026))[0].round == 2
+    assert len(caplog.records) == (0 if limited else 1)
 
 
 @pytest.mark.parametrize("operation", ["schedule", "lookup", "results"])

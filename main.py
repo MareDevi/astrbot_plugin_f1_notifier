@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -34,7 +35,8 @@ HELP_TEXT = """F1 Notifier
 /f1 unsubscribe — 取消当前会话订阅
 /f1 test [season] — 只读检查数据源，默认 2025
 
-订阅推送：赛前 24 小时周末赛程、各节练习赛 / 排位赛 / 冲刺赛结果、正赛前 30 分钟发车顺序、正赛结果。
+订阅推送：比赛周指定星期与时间的周末赛程、各节练习赛 / 排位赛 / 冲刺赛结果、正赛前 30 分钟发车顺序、正赛结果。
+周末赛程默认周一 09:00，可在插件设置中选择周一 / 周二 / 周三及时间。
 时间默认 Asia/Shanghai。结果在数据源发布后推送，可能延迟。
 """
 
@@ -55,6 +57,16 @@ class F1NotifierPlugin(Star):
             ZoneInfo(self.config["timezone"])
         except (ZoneInfoNotFoundError, TypeError) as exc:
             raise ValueError("Invalid F1 display timezone") from exc
+        self.config.setdefault("weekend_push_day", "周一")
+        self.config.setdefault("weekend_push_time", "09:00")
+        if self.config["weekend_push_day"] not in ("周一", "周二", "周三"):
+            raise ValueError("weekend_push_day must be 周一, 周二, or 周三")
+        push_time = self.config["weekend_push_time"]
+        if (
+            not isinstance(push_time, str)
+            or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", push_time) is None
+        ):
+            raise ValueError("weekend_push_time must use HH:MM between 00:00 and 23:59")
         for key, default, minimum, maximum in (
             ("result_poll_delay", 5, 0, 120),
             ("image_cache_max_age", 30, 1, 1440),

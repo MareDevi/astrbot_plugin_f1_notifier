@@ -1,3 +1,25 @@
+# Changelog
+
+## 2.0.0
+
+- Rebuild the plugin around instance-owned HTTP clients, immutable weekend models, and shared text/image tables.
+- Preserve all `/f1` commands and add explicit argument validation and timezone labels.
+- Deliver sprint and sprint-qualifying results alongside practice, qualifying, race results, weekend reminders, and starting grids.
+- Match OpenF1 sessions by type and scheduled time instead of global `latest`.
+- Bound caches, pace provider requests, honor rate-limit cooldowns, and treat unpublished datasets as pending.
+- Persist successful delivery per season, round, event, and conversation; retry failed recipients independently.
+- Restore subscriptions before starting polling and continue checking recently completed weekends.
+- Rebuild cards with asynchronous rendering, bounded disk caches, and text fallback.
+- Use the AstrBot root Mise environment for dependencies, tests, lint, and startup.
+
+### Migration
+
+- Require AstrBot 4.29.3 or a newer 4.x release.
+- Import legacy `f1_subscribers` once into `f1_v2_state`; retain legacy keys for rollback.
+- Do not migrate seasonless legacy notification acknowledgements; an upgrade may repeat a result inside the 48-hour catch-up window.
+- Remove the unused `headshot_cache_max` setting. New cards do not download driver portraits.
+- Keep all command entry points unchanged. Add `timezone`, defaulting to `Asia/Shanghai`.
+
 ## [1.1.3] - 2026-03-12
 
 ### 🚀 Features

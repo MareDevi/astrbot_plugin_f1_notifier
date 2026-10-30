@@ -1,81 +1,105 @@
-# astrbot_plugin_f1_notifier
+# F1 Notifier for AstrBot
 
-🏎 **F1 Notifier** — AstrBot 的 F1 赛事推送与查询插件
+F1 赛事查询与会话订阅推送插件。支持文字与 F1 风格图片卡片；查询和通知使用相同数据内容。
 
-自动推送 F1 比赛周通知（赛程提醒、练习赛结果、排位赛结果、冲刺赛结果、发车顺序、正赛结果），同时支持用户通过指令主动查询赛程、积分榜等信息。
+## 功能与指令
 
----
+| 指令 | 功能 |
+| --- | --- |
+| `/f1 help` | 帮助 |
+| `/f1 schedule` | 未来 5 站赛程，包含已公布的周末场次 |
+| `/f1 next` | 下一站完整周末时间表 |
+| `/f1 result [round]` | 正赛结果，默认最近已开始的一站 |
+| `/f1 qualifying [round]` | 排位赛结果，包含 Q1 / Q2 / Q3 |
+| `/f1 sprint [round]` | 冲刺赛结果 |
+| `/f1 practice [1\|2\|3]` | 最近一次指定练习赛结果，也接受 FP1 / FP2 / FP3 |
+| `/f1 standings [drivers\|teams]` | 当赛季车手 / 车队积分榜 |
+| `/f1 subscribe` | 订阅当前会话 |
+| `/f1 unsubscribe` | 取消当前会话订阅 |
+| `/f1 test [season]` | 只读检查赛程、结果、发车顺序与积分榜，默认 2025 |
 
-## 功能特性
+指定站次时查询当年赛季；省略站次时按对应赛段选择最近已开始的一场。当前结果尚未发布时会明确提示，不会拿上一站冒充。年初没有对应场次时，默认查询可以回到上一赛季。休赛期赛程查询会尝试获取下一赛季。
 
-### 自动推送（订阅后生效）
+订阅后自动推送：
 
-| 触发时机 | 推送内容 |
-|---|---|
-| 距第一个练习赛开始 ≤ 24 小时 | 比赛周开始提醒 + 完整周末赛程表 |
-| 每场练习赛结束后 | FP1 / FP2 / FP3 最快圈速排行 |
-| 排位赛结束后 | 排位赛完整结果 |
-| 冲刺赛结束后（冲刺周末） | 冲刺赛完整结果 |
-| 正赛开始前 30 分钟 | 正赛发车顺序 |
-| 正赛结束后 | 正赛完整结果 |
+- 比赛周第一节场次开始前 24 小时：周末完整赛程。
+- FP1 / FP2 / FP3、排位赛、冲刺排位赛、冲刺赛及正赛结果。
+- 正赛开始前 30 分钟：已发布的发车顺序。
 
-### 指令查询
-
-所有指令以 `/f1` 开头：
-
-| 指令 | 说明 |
-|---|---|
-| `/f1 help` | 显示帮助信息 |
-| `/f1 schedule` | 近期赛程（最近 5 站） |
-| `/f1 next` | 下一站完整时间表 |
-| `/f1 result [round]` | 正赛结果（默认最近一场，可指定站次） |
-| `/f1 qualifying [round]` | 排位赛结果（默认最近一场，可指定站次） |
-| `/f1 sprint [round]` | 冲刺赛结果（默认最近一场，可指定站次） |
-| `/f1 practice [1\|2\|3]` | 练习赛最快圈速（默认 FP1） |
-| `/f1 standings drivers` | 车手积分榜 |
-| `/f1 standings teams` | 车队积分榜 |
-| `/f1 subscribe` | 订阅当前会话的自动推送 |
-| `/f1 unsubscribe` | 取消当前会话的自动推送 |
-| `/f1 test [season]` | 测试插件各项查询功能（默认 2025 赛季） |
-
----
+结果优先按 OpenF1 已发布的场次结束时间加配置延迟开始轮询；缺失结束时间时使用预计时长，每轮间隔 60 秒；没有发布就继续等待。每个结果最多追补到预计结束后 48 小时。新订阅不补发订阅前已经开始的场次结果；重启后的已有订阅可在有效窗口内继续接收。
 
 ## 安装
 
-在 AstrBot 插件管理页面中搜索 `astrbot_plugin_f1_notifier` 并安装，或手动克隆本仓库到插件目录：
+要求 AstrBot **4.29.3 或更新的 4.x 版本**。插件代码支持 Python 3.10+；实际运行版本须同时满足 AstrBot 本体要求。
+
+通过 AstrBot 插件管理页安装，或在 AstrBot 项目根目录执行：
 
 ```bash
-git clone https://github.com/MareDevi/astrbot_plugin_f1_notifier
+git clone https://github.com/MareDevi/astrbot_plugin_f1_notifier data/plugins/astrbot_plugin_f1_notifier
 ```
 
-插件依赖 `aiohttp`，AstrBot 会在安装时自动处理。
+第三方 Python 依赖声明在 `requirements.txt`，由 AstrBot 插件管理器安装。图片使用 Pillow；已有赛道 SVG 可以通过 CairoSVG 渲染。缺少 Cairo 原生库或赛道素材时，卡片仍可输出，不会生成虚构赛道。中文字体优先使用系统字体，建议 Linux 安装 Noto Sans CJK。时区数据库由 `tzdata` 提供，兼容 Windows。
 
----
+修改代码或配置后，在 WebUI 的插件页重载插件。开发方式遵循 [AstrBot 插件开发指南](https://docs.astrbot.app/dev/star/plugin-new.html)。
 
-## 使用方法
+## 配置
 
-1. 安装并启用插件后，在任意支持的会话中发送 `/f1 subscribe` 即可订阅自动推送。
-2. 发送 `/f1 help` 查看完整指令列表。
-3. 发送 `/f1 unsubscribe` 可随时取消订阅。
+| 配置 | 默认值 | 含义 |
+| --- | --- | --- |
+| `enable_image_render` | `false` | 使用图片卡片；关闭时完全不运行图片渲染 |
+| `timezone` | `Asia/Shanghai` | 显示使用的 IANA 时区；所有调度比较使用 UTC |
+| `result_poll_delay` | `5` | 预计场次结束后额外等待的分钟数，0–120 |
+| `image_cache_max_age` | `30` | 图片缓存保留分钟数，1–1440 |
+| `image_cache_max_count` | `50` | 图片缓存数量上限，1–200 |
 
-订阅信息与推送状态会通过 AstrBot KV 存储持久化，重启后自动恢复。
+图片渲染失败时查询返回文字；主动图片发送抛出异常时尝试文字。平台不支持主动消息或发送失败时保留待发送状态。订阅不代表消息平台一定允许机器人主动推送，详见 [AstrBot 主动消息说明](https://docs.astrbot.app/dev/star/guides/send-message.html)。
 
----
+## 数据来源与可靠性
 
-## 数据来源
+- [Jolpica-F1](https://github.com/jolpica/jolpica-f1/blob/main/docs/README.md)：赛程、正赛、排位赛、冲刺赛与积分榜。
+- [OpenF1](https://openf1.org/docs/)：场次起止时间、练习赛、冲刺排位赛与正赛发车顺序。通过场次类型和预定开始时间匹配，不使用全局 `latest`。
 
-- **[Jolpica-F1](https://api.jolpi.ca/ergast/f1/)** (Ergast API 镜像)：赛程、比赛结果、积分榜
-- **[OpenF1](https://api.openf1.org/v1/)**：练习赛实时圈速数据
+OpenF1 免费接口提供 2023 年以来的历史数据，实时数据需要订阅。本插件使用公开接口，不承诺实时结果或固定发布延迟。空结果及未发布数据不记为推送成功；遇到 HTTP 429 会遵守 `Retry-After` 冷却。缓存与请求预算由各插件实例独立持有，缓存最多 128 项。
 
----
+订阅与发送记录保存在 AstrBot 插件 KV 中。去重键包含赛季、站次、事件及具体会话。一个会话发送失败，不会导致其他成功会话被重复发送。每次成功后立即持久化；如果进程恰好在平台接受消息后、保存状态前崩溃，重启仍可能重复一次，无法保证端到端恰好一次投递。
 
-## 依赖
+图片缓存位于 `data/plugin_data/astrbot_plugin_f1_notifier/images`，不写入插件安装目录。卸载或重载会等待后台轮询和渲染收尾，再释放 HTTP 连接。
 
-- [AstrBot](https://github.com/AstrBotDevs/AstrBot) >= 适配当前 API 版本
-- `aiohttp`
+### 从 1.x 升级
 
----
+全部现有 `/f1` 指令继续可用。首次启动自动读取旧 `f1_subscribers`，写入新 `f1_v2_state`，保留旧键供回退。新状态已存在时不会重复导入。
+
+旧 `f1_state` 没有完整赛季与逐会话投递信息，无法安全转换，因此不沿用旧去重记录。升级后，有效的 48 小时结果窗口内可能重发一次旧结果。`headshot_cache_max` 已移除：新版卡片不依赖网络头像；旧配置中的此字段不再生效。
+
+## 开发
+
+插件仓库放在 AstrBot 根目录的 `data/plugins/astrbot_plugin_f1_notifier` 下，使用 **AstrBot 根目录**的 `mise.toml`。当前开发环境固定 Python `3.13.16`、uv `0.13.1`，不会修改全局工具版本。
+
+在 AstrBot 根目录运行：
+
+```bash
+mise install
+mise run sync
+mise run test-f1
+mise run lint-f1
+mise run check
+mise run run
+```
+
+`sync` 先运行 AstrBot 的 `uv sync`，再把插件依赖安装到同一个 `.venv`。`test-f1` 测试真实业务模块与 AstrBot 的命令加载；API 测试使用本地临时 HTTP 服务，不依赖外网。不要在生产实例运行测试。
+
+独立插件仓库也可用 `uv run --extra dev pytest` 执行数据、调度和排版测试；命令集成测试需要 AstrBot 依赖以及可导入的 AstrBot 源码，因此推荐使用上面的统一开发环境。
+
+代码结构：
+
+- `main.py`：AstrBot 命令、生命周期、文字与图片发送。
+- `models.py`：明确时区的场次、赛程和通用表格模型。
+- `api.py`：HTTP 会话、缓存、限流、数据源适配与精确场次匹配。
+- `scheduler.py`：订阅、推送窗口和逐会话持久化确认。
+- `formatter.py` / `image_renderer.py`：相同表格的文字与图片输出。
+
+以上模块除入口文件外，均位于 `src/astrbot_plugin_f1_notifier/`。变更应附带真实行为测试，提交使用 Conventional Commits。
 
 ## 许可证
 
-[AGPL-3.0](LICENSE)
+[AGPL-3.0](LICENSE)。保留原有字体、赛道素材和 Logo 资产。

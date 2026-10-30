@@ -314,3 +314,59 @@ async def test_openf1_outage_does_not_hide_jolpica_schedule(client, monkeypatch)
 
     monkeypatch.setattr(client, "_get", payload)
     assert (await client.schedule(2026))[0].round == 2
+
+
+@pytest.mark.parametrize("operation", ["schedule", "lookup", "results"])
+async def test_cancelled_session_does_not_hide_active_replacement(
+    client, monkeypatch, operation
+):
+    raw = {
+        "season": "2026",
+        "round": "2",
+        "raceName": "China",
+        "date": "2026-03-15",
+        "time": "07:00:00Z",
+        "FirstPractice": {"date": "2026-03-13", "time": "07:00:00Z"},
+    }
+    sessions = [
+        {
+            "session_key": 1,
+            "session_name": "Practice 1",
+            "date_start": "2026-03-13T07:00:00Z",
+            "date_end": "2026-03-13T08:00:00Z",
+            "is_cancelled": True,
+        },
+        {
+            "session_key": 2,
+            "session_name": "Practice 1",
+            "date_start": "2026-03-13T08:00:00Z",
+            "date_end": "2026-03-13T09:00:00Z",
+            "is_cancelled": False,
+        },
+    ]
+
+    async def payload(base, path, params=None, ttl=30):
+        if path == "/sessions":
+            return sessions
+        if path == "/session_result":
+            return (
+                [{"driver_number": 4, "position": 1, "duration": 90.123}]
+                if params["session_key"] == 2
+                else []
+            )
+        if path == "/drivers":
+            return [{"driver_number": 4, "full_name": "Lando Norris"}]
+        return {"MRData": {"RaceTable": {"Races": [raw]}}}
+
+    monkeypatch.setattr(client, "_get", payload)
+    race = Race.from_jolpica(raw)
+    if operation == "schedule":
+        race = (await client.schedule(2026))[0]
+        slot = next(s for s in race.sessions if s.key == "practice1")
+        assert slot.start == datetime(2026, 3, 13, 8, tzinfo=timezone.utc)
+    elif operation == "lookup":
+        assert (await client.openf1_session(race, "practice1"))["session_key"] == 2
+    else:
+        table = await client.results(race, "practice1")
+        assert table is not None
+        assert table.rows[0][1] == "Lando Norris"

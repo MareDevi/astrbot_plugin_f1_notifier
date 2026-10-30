@@ -189,6 +189,8 @@ class F1Client:
                         if slot.key == "sprint_qualifying":
                             names.add("Sprint Shootout")
                         for row in timings:
+                            if row.get("is_cancelled") is True:
+                                continue
                             try:
                                 start = parse_datetime(row["date_start"])
                                 end = (
@@ -254,6 +256,8 @@ class F1Client:
             raise DataError("场次数据格式异常，请稍后重试。")
         candidates = []
         for row in rows:
+            if row.get("is_cancelled") is True:
+                continue
             try:
                 delta = abs(
                     (parse_datetime(row["date_start"]) - slot.start).total_seconds()

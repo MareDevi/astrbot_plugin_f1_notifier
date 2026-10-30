@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from astrbot.api import logger
+
 from .api import F1Client, RateLimitError
 from .models import Race, Table, parse_datetime
 
-logger = logging.getLogger(__name__)
 STATE_KEY = "f1_v2_state"
 RESULT_DURATIONS = {
     "practice1": 60,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import math
 import time
 from collections import OrderedDict
@@ -13,10 +12,9 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 import aiohttp
+from astrbot.api import logger
 
 from .models import SESSION_NAMES, Race, Session, Table, parse_datetime
-
-logger = logging.getLogger(__name__)
 
 OPENF1_NAMES = {
     "practice1": "Practice 1",

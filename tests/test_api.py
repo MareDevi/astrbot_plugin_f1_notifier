@@ -84,6 +84,7 @@ async def test_http_cache_is_per_instance_and_empty_list_is_not_cached(client, s
 
 
 async def test_rate_limit_sets_cooldown_without_caching_error(client, server, caplog):
+    caplog.set_level("WARNING")
     base, state = server
     state["status"] = 429
     with pytest.raises(api.DataError, match="限流"):

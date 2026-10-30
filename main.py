@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from astrbot.api import AstrBotConfig
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, StarTools
 
@@ -21,7 +20,6 @@ from .src.astrbot_plugin_f1_notifier.image_renderer import ImageRenderer
 from .src.astrbot_plugin_f1_notifier.models import Table
 from .src.astrbot_plugin_f1_notifier.scheduler import F1Scheduler
 
-logger = logging.getLogger(__name__)
 HELP_TEXT = """F1 Notifier
 /f1 help — 帮助
 /f1 schedule — 未来 5 站赛程

@@ -20,7 +20,7 @@ except (ImportError, OSError):
 
 from .models import Table
 
-_LAYOUT_VERSION = "f1-card-v1"
+_LAYOUT_VERSION = "f1-card-v2"
 _PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 _ASSETS_DIR = _PLUGIN_ROOT / "assets"
 _FONTS_DIR = _ASSETS_DIR / "fonts"
@@ -113,6 +113,7 @@ class ImageRenderer:
         self._state_lock = asyncio.Lock()
         self._workers: dict[asyncio.Task[Path], asyncio.Event] = {}
         self._font_cache: dict[tuple[int, bool], ImageFont.FreeTypeFont] = {}
+        self._latin_font_cache: dict[tuple[int, bool], ImageFont.FreeTypeFont] = {}
         self._closed = False
 
     async def render(self, table: Table) -> Path:
@@ -191,6 +192,28 @@ class ImageRenderer:
             return ImageFont.load_default(size=size)
         except TypeError:
             return ImageFont.load_default()
+
+    def _load_latin_font(self, size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+        """Load the bundled racing font for Latin text and timing values.
+
+        Args:
+            size: Requested font size in pixels.
+            bold: Whether to load the bold face.
+
+        Returns:
+            The bundled Orbitron font, falling back to the CJK font loader.
+        """
+        key = (size, bold)
+        if key in self._latin_font_cache:
+            return self._latin_font_cache[key]
+
+        filename = "Orbitron-Bold.ttf" if bold else "Orbitron-Regular.ttf"
+        try:
+            font = ImageFont.truetype(str(_FONTS_DIR / filename), size)
+        except (OSError, ValueError):
+            return self._load_font(size, bold=bold)
+        self._latin_font_cache[key] = font
+        return font
 
     def _ellipsize(
         self,
@@ -426,10 +449,14 @@ class ImageRenderer:
         table_width = _CARD_WIDTH - _MARGIN * 2
         regular = self._load_font(18)
         bold = self._load_font(19, bold=True)
-        header_font = self._load_font(17, bold=True)
-        title_font = self._load_font(36, bold=True)
+        latin_regular = self._load_latin_font(17)
+        latin_bold = self._load_latin_font(18, bold=True)
+        header_font = self._load_font(16, bold=True)
+        title_font = self._load_font(44, bold=True)
         subtitle_font = self._load_font(19)
-        footer_font = self._load_font(17)
+        footer_font = self._load_font(16)
+        micro_font = self._load_latin_font(12, bold=True)
+        row_index_font = self._load_latin_font(14, bold=True)
 
         column_count = max(
             len(table.columns),
@@ -442,168 +469,256 @@ class ImageRenderer:
         )
 
         measure = ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength
-        gap = 18
-        usable_width = table_width - gap * (column_count - 1)
+        index_width = 54
+        usable_width = table_width - index_width
         natural_widths = []
         for index, heading in enumerate(columns):
             cells = [heading, *(row[index] for row in normalized_rows)]
-            widest = max((measure(cell, font=regular) for cell in cells), default=0)
-            natural_widths.append(min(max(76.0, widest + 24), 360.0))
+            widest = max(
+                (
+                    measure(
+                        cell,
+                        font=latin_regular if cell.isascii() else regular,
+                    )
+                    for cell in cells
+                ),
+                default=0,
+            )
+            natural_widths.append(min(max(82.0, widest + 28), 380.0))
         width_total = sum(natural_widths)
         widths = [
-            max(76, int(usable_width * width_value / width_total))
+            max(82, int(usable_width * width_value / width_total))
             for width_value in natural_widths
         ]
         widths[-1] += usable_width - sum(widths)
 
         wrapped_rows: list[list[list[str]]] = []
+        wrapped_fonts: list[list[ImageFont.ImageFont]] = []
         row_heights: list[int] = []
-        line_height = 25
+        line_height = 24
         for row in normalized_rows:
-            wrapped_row = [
-                self._wrap(row[index], regular, widths[index] - 14)
-                for index in range(column_count)
-            ]
+            wrapped_row: list[list[str]] = []
+            row_fonts: list[ImageFont.ImageFont] = []
+            for index in range(column_count):
+                cell_font = latin_regular if row[index].isascii() else regular
+                row_fonts.append(cell_font)
+                wrapped_row.append(
+                    self._wrap(row[index], cell_font, widths[index] - 20)
+                )
             wrapped_rows.append(wrapped_row)
+            wrapped_fonts.append(row_fonts)
             row_heights.append(
-                22 + max(len(lines) for lines in wrapped_row) * line_height
+                max(
+                    60,
+                    20 + max(len(lines) for lines in wrapped_row) * line_height,
+                )
             )
 
-        header_height = 188
-        column_header_height = 54
-        footer_height = 88
+        header_height = 180
+        column_header_height = 52
+        footer_height = 82
         table_height = sum(row_heights)
         card_height = (
-            header_height + column_header_height + table_height + footer_height + 20
+            header_height + column_header_height + table_height + footer_height
         )
 
-        image = Image.new("RGB", (_CARD_WIDTH, card_height), "#090C12")
+        red = "#E10600"
+        white = "#F7F7F4"
+        ink = "#080808"
+        muted = "#A6A6A6"
+        rule = "#2A2A2A"
+        image = Image.new("RGB", (_CARD_WIDTH, card_height), ink)
         draw = ImageDraw.Draw(image)
-        for y in range(card_height):
-            blend = y / max(1, card_height)
-            color = (
-                int(9 + 12 * blend),
-                int(12 + 12 * blend),
-                int(18 + 15 * blend),
-            )
-            draw.line((0, y, _CARD_WIDTH, y), fill=color)
 
-        draw.rectangle((0, 0, _CARD_WIDTH, 9), fill="#E1062C")
-        draw.rectangle((_MARGIN, 32, _MARGIN + 8, 146), fill="#E1062C")
-        draw.rounded_rectangle(
-            (_MARGIN + 28, 38, _MARGIN + 132, 142),
-            radius=18,
-            fill="#E1062C",
+        # White broadcast header with an angular F1-red identity block.
+        draw.rectangle((0, 0, _CARD_WIDTH, header_height), fill=white)
+        draw.rectangle((0, 0, _CARD_WIDTH, 6), fill=red)
+        draw.polygon(
+            ((0, 0), (218, 0), (188, header_height), (0, header_height)),
+            fill=red,
         )
-        draw.text(
-            (_MARGIN + 47, 63),
-            "F1",
-            font=self._load_font(42, bold=True),
-            fill="#FFFFFF",
+        draw.polygon(
+            (
+                (900, 0),
+                (_CARD_WIDTH, 0),
+                (_CARD_WIDTH, header_height),
+                (870, header_height),
+            ),
+            fill=ink,
         )
-        title = self._ellipsize(table.title or "F1 信息", title_font, 620)
-        draw.text((_MARGIN + 158, 50), title, font=title_font, fill="#FFFFFF")
-        subtitle = self._ellipsize(table.subtitle, subtitle_font, 620)
+        draw.rectangle((0, header_height, _CARD_WIDTH, header_height + 5), fill=ink)
+
+        logo = None
+        if cairosvg is not None:
+            output = io.BytesIO()
+            try:
+                cairosvg.svg2png(
+                    url=str(_ASSETS_DIR / "f1.svg"),
+                    write_to=output,
+                    output_width=112,
+                    output_height=80,
+                )
+                output.seek(0)
+                with Image.open(output) as source:
+                    logo = source.convert("RGBA")
+            except Exception:
+                logo = None
+        if logo is not None:
+            image.paste(logo, (42, 42), logo)
+        else:
+            draw.text(
+                (52, 49), "F1", font=self._load_latin_font(50, bold=True), fill=white
+            )
+
+        title = self._ellipsize(
+            (table.title or "F1 信息").upper(),
+            title_font,
+            590,
+        )
+        draw.text((252, 34), title, font=title_font, fill=ink)
+        subtitle = self._ellipsize(table.subtitle.upper(), subtitle_font, 580)
         if subtitle:
             draw.text(
-                (_MARGIN + 160, 104),
+                (252, 94),
                 subtitle,
                 font=subtitle_font,
-                fill="#AEB6C5",
+                fill="#4B4B4B",
             )
         draw.text(
-            (_MARGIN + 160, 139),
-            "F1 赛事信息卡",
-            font=self._load_font(13, bold=True),
-            fill="#E1062C",
+            (252, 136),
+            "F1 // TIMING GRAPHIC",
+            font=micro_font,
+            fill=red,
         )
 
-        graphic = self._circuit_graphic(table.circuit_id, (240, 132))
-        graphic_x = _CARD_WIDTH - _MARGIN - 240
+        graphic = self._circuit_graphic(table.circuit_id, (132, 132))
+        graphic_x = _CARD_WIDTH - 158
         if graphic is not None:
-            image.paste(graphic, (graphic_x, 34), graphic)
+            image.paste(graphic, (graphic_x, 20), graphic)
         else:
-            draw.rounded_rectangle(
-                (graphic_x, 34, graphic_x + 240, 166),
-                radius=20,
-                outline="#4A1020",
-                width=2,
+            draw.line(
+                (graphic_x + 8, 52, graphic_x + 116, 52),
+                fill="#434343",
+                width=18,
             )
-            draw.ellipse(
-                (graphic_x + 77, 49, graphic_x + 163, 135),
-                outline="#E1062C",
-                width=4,
+            draw.line(
+                (graphic_x + 116, 52, graphic_x + 116, 126),
+                fill="#434343",
+                width=18,
             )
-            draw.text(
-                (graphic_x + 92, 70),
-                "F1",
-                font=self._load_font(34, bold=True),
-                fill="#FFFFFF",
+            draw.line(
+                (graphic_x + 116, 126, graphic_x + 18, 126),
+                fill="#434343",
+                width=18,
             )
-            draw.text(
-                (graphic_x + 92, 139),
-                "赛道图",
-                font=self._load_font(14, bold=True),
-                fill="#AEB6C5",
-            )
+        draw.text((916, 143), "CIRCUIT", font=micro_font, fill=muted)
 
-        header_top = header_height
-        draw.rounded_rectangle(
-            (
-                _MARGIN,
-                header_top,
-                _CARD_WIDTH - _MARGIN,
-                header_top + column_header_height,
-            ),
-            radius=12,
-            fill="#202532",
+        header_top = header_height + 5
+        draw.rectangle(
+            (0, header_top, _CARD_WIDTH, header_top + column_header_height),
+            fill=red,
         )
-        x = _MARGIN + 10
+        draw.text(
+            (_MARGIN, header_top + 17),
+            "NO.",
+            font=micro_font,
+            fill=white,
+        )
+        x = _MARGIN + index_width
         for index, heading in enumerate(columns):
-            label = self._ellipsize(heading, header_font, widths[index] - 14)
-            draw.text((x, header_top + 16), label, font=header_font, fill="#FFFFFF")
-            x += widths[index] + gap
+            label = self._ellipsize(heading.upper(), header_font, widths[index] - 20)
+            draw.text((x + 12, header_top + 15), label, font=header_font, fill=white)
+            x += widths[index]
+
+        rank_table = bool(normalized_rows) and all(
+            row[0].strip().isdigit() for row in normalized_rows
+        )
+        session_labels = {"正赛", "RACE", "R"}
 
         y = header_top + column_header_height
-        for row_index, (wrapped_row, row_height) in enumerate(
-            zip(wrapped_rows, row_heights, strict=True)
+        for row_index, (wrapped_row, row_fonts, row_height) in enumerate(
+            zip(wrapped_rows, wrapped_fonts, row_heights, strict=True)
         ):
-            background = "#111620" if row_index % 2 == 0 else "#151B27"
-            draw.rounded_rectangle(
-                (_MARGIN, y + 2, _CARD_WIDTH - _MARGIN, y + row_height - 2),
-                radius=8,
-                fill=background,
+            cells = normalized_rows[row_index]
+            is_race = any(cell.strip().upper() in session_labels for cell in cells)
+            is_podium = rank_table and cells[0].strip().isdigit() and int(cells[0]) <= 3
+            accent = red if is_race or is_podium else "#202020"
+            background = "#080808" if row_index % 2 == 0 else "#101010"
+            draw.rectangle((0, y, _CARD_WIDTH, y + row_height), fill=background)
+            draw.rectangle((0, y, 6, y + row_height), fill=accent)
+            draw.text(
+                (_MARGIN, y + 18),
+                f"{row_index + 1:02d}",
+                font=row_index_font,
+                fill=muted if not (is_race or is_podium) else red,
             )
-            x = _MARGIN + 10
+
+            x = _MARGIN + index_width
             for column_index, lines in enumerate(wrapped_row):
-                text_color = "#F2F5FA"
-                if column_index == 0 and row_index < 3:
-                    text_color = "#FF4058"
+                text_color = white
+                if cells[column_index].strip().upper() in session_labels:
+                    text_color = red
+                elif column_index == 0 and is_podium:
+                    text_color = red
+                elif column_index == column_count - 1:
+                    text_color = "#CFCFCF"
+
+                cell_font = row_fonts[column_index]
+                cell_bold = latin_bold if cells[column_index].isascii() else bold
+                draw_font = cell_bold if column_index == 0 or is_race else cell_font
+                align = "left"
+                if rank_table and column_index == 0:
+                    align = "center"
+                elif rank_table and column_index == column_count - 1:
+                    align = "right"
+
                 for line_index, line in enumerate(lines):
+                    line_x = x + 12
+                    line_width = measure(line, font=draw_font)
+                    if align == "center":
+                        line_x = x + (widths[column_index] - line_width) / 2
+                    elif align == "right":
+                        line_x = x + widths[column_index] - line_width - 18
                     draw.text(
-                        (x, y + 10 + line_index * line_height),
+                        (line_x, y + 16 + line_index * line_height),
                         line,
-                        font=bold if column_index == 0 else regular,
+                        font=draw_font,
                         fill=text_color,
                     )
-                x += widths[column_index] + gap
+                x += widths[column_index]
+            draw.line(
+                (
+                    _MARGIN,
+                    y + row_height - 1,
+                    _CARD_WIDTH - _MARGIN,
+                    y + row_height - 1,
+                ),
+                fill=rule,
+                width=1,
+            )
             y += row_height
 
         footer_top = card_height - footer_height
-        draw.line(
-            (_MARGIN, footer_top, _CARD_WIDTH - _MARGIN, footer_top),
-            fill="#3A4050",
-            width=2,
+        draw.rectangle((0, footer_top, _CARD_WIDTH, card_height), fill=ink)
+        draw.rectangle((0, footer_top, _CARD_WIDTH, footer_top + 3), fill=white)
+        draw.rectangle(
+            (_MARGIN, footer_top + 28, _MARGIN + 10, footer_top + 38), fill=red
         )
-        footer = self._ellipsize(table.footer, footer_font, table_width - 180)
-        draw.text((_MARGIN, footer_top + 27), footer, font=footer_font, fill="#AEB6C5")
-        draw.ellipse(
-            (
-                _CARD_WIDTH - _MARGIN - 14,
-                footer_top + 31,
-                _CARD_WIDTH - _MARGIN,
-                footer_top + 45,
-            ),
-            fill="#E1062C",
+        footer = self._ellipsize(
+            table.footer or "F1 TIMING DATA",
+            footer_font,
+            table_width - 260,
+        )
+        draw.text(
+            (_MARGIN + 22, footer_top + 23),
+            footer,
+            font=footer_font,
+            fill="#D6D6D6",
+        )
+        draw.text(
+            (_CARD_WIDTH - _MARGIN - 132, footer_top + 27),
+            "F1 // DATA",
+            font=micro_font,
+            fill=muted,
         )
         return image

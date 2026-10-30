@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astrbot-plugin-f1-notifier"
-version = "2.0.1"
+version = "2.0.2"
 description = "Reliable F1 race notifications and queries for AstrBot"
 authors = [{ name = "MareDevi" }]
 readme = "README.md"

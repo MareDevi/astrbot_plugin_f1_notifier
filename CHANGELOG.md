@@ -1,5 +1,9 @@
 # Changelog
 
+## [2.0.2] - 2026-10-30
+
+- Use the logger provided by `astrbot.api` throughout the plugin to comply with plugin review requirements.
+
 ## [2.0.1] - 2026-10-30
 
 - Log HTTP 429 once per provider until a successful response resets the warning; suppress repeated rate-limit exceptions in polling and schedule fallback while retaining retries and other error logs.

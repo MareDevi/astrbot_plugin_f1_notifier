@@ -12,7 +12,7 @@ license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.10"
 dependencies = [
   "aiohttp>=3.9,<4",
-  "pillow>=10,<13",
+  "pillow>=10,<14",
   "cairosvg>=2.7,<3",
   "tzdata>=2025.1",
 ]

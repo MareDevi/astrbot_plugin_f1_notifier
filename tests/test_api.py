@@ -1,6 +1,7 @@
 """Contract tests for the F1 data client and normalized models."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock
 
 import pytest
 from aiohttp import web
@@ -33,6 +34,133 @@ async def client(server):
     await instance.open()
     yield instance
     await instance.close()
+
+
+@pytest.mark.parametrize(
+    "minutes,blocked", [(-31, False), (-30, True), (0, True), (90, True), (91, False)]
+)
+async def test_openf1_requests_skip_live_window(
+    client, server, monkeypatch, minutes, blocked
+):
+    start = datetime(2026, 10, 31, 6, tzinfo=timezone.utc)
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = start + timedelta(minutes=minutes)
+    monkeypatch.setattr(api, "datetime", clock)
+    race = Race(2026, 19, "Mexico", "", "", "", (Session("practice2", start),))
+    _, state = server
+    state["payload"] = []
+    assert await client.openf1_session(race, "practice2") is None
+    assert state["calls"] == (0 if blocked else 1)
+
+
+async def test_schedule_skips_openf1_during_live_session(
+    client, server, monkeypatch, caplog
+):
+    caplog.set_level("WARNING")
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = datetime(2026, 10, 31, 6, tzinfo=timezone.utc)
+    monkeypatch.setattr(api, "datetime", clock)
+    _, state = server
+    state["payload"] = {
+        "MRData": {
+            "RaceTable": {
+                "Races": [
+                    {
+                        "season": "2026",
+                        "round": "19",
+                        "raceName": "Mexico",
+                        "date": "2026-11-01",
+                        "time": "20:00:00Z",
+                        "SecondPractice": {"date": "2026-10-31", "time": "06:00:00Z"},
+                    }
+                ]
+            }
+        }
+    }
+    assert (await client.schedule(2026))[0].round == 19
+    assert state["calls"] == 1
+    assert not caplog.records
+
+
+async def test_confirmed_end_blocks_results_of_other_sessions(
+    client, server, monkeypatch
+):
+    start = datetime(2026, 10, 31, 6, tzinfo=timezone.utc)
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = start - timedelta(minutes=31)
+    monkeypatch.setattr(api, "datetime", clock)
+    race = Race(
+        2026,
+        19,
+        "Mexico",
+        "",
+        "",
+        "",
+        (
+            Session("practice1", start - timedelta(days=1)),
+            Session("practice2", start),
+        ),
+    )
+    _, state = server
+    state["payload"] = [
+        {
+            "session_key": 10,
+            "session_name": "Practice 2",
+            "date_start": start.isoformat(),
+            "date_end": (start + timedelta(hours=2)).isoformat(),
+        }
+    ]
+    assert await client.openf1_session(race, "practice2") is not None
+    clock.now.return_value = start + timedelta(minutes=100)
+    assert await client.results(race, "practice1") is None
+    assert state["calls"] == 1
+    clock.now.return_value = start + timedelta(minutes=151)
+    assert await client.openf1_session(race, "practice1") is None
+    assert state["calls"] == 2
+
+
+async def test_timing_warning_once_per_race_even_after_recovery(
+    client, monkeypatch, caplog
+):
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = datetime(2026, 3, 14, tzinfo=timezone.utc)
+    monkeypatch.setattr(api, "datetime", clock)
+    failed = True
+
+    async def payload(base, path, params=None, ttl=30):
+        if path == "/sessions":
+            if failed:
+                raise api.DataError("unavailable")
+            return []
+        return {
+            "MRData": {
+                "RaceTable": {
+                    "Races": [
+                        {
+                            "season": "2026",
+                            "round": str(round_),
+                            "raceName": "GP",
+                            "date": date,
+                            "time": "07:00:00Z",
+                        }
+                        for round_, date in [(2, "2026-03-15"), (3, "2026-03-22")]
+                    ]
+                }
+            }
+        }
+
+    monkeypatch.setattr(client, "_get", payload)
+    await client.schedule(2026)
+    await client.schedule(2026)
+    failed = False
+    await client.schedule(2026)
+    failed = True
+    await client.schedule(2026)
+    assert len(caplog.records) == 1
+    clock.now.return_value += timedelta(days=7)
+    await client.schedule(2026)
+    await client.schedule(2026)
+    assert len(caplog.records) == 2
 
 
 def test_timestamp_rejects_unknown_timezone():

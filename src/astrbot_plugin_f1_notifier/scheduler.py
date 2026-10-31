@@ -11,18 +11,9 @@ from zoneinfo import ZoneInfo
 from astrbot.api import logger
 
 from .api import F1Client, RateLimitError
-from .models import Race, Table, parse_datetime
+from .models import RESULT_DURATIONS, Race, Table, parse_datetime
 
 STATE_KEY = "f1_v2_state"
-RESULT_DURATIONS = {
-    "practice1": 60,
-    "practice2": 60,
-    "practice3": 60,
-    "sprint_qualifying": 60,
-    "qualifying": 90,
-    "sprint": 90,
-    "race": 180,
-}
 
 
 class F1Scheduler:
@@ -291,15 +282,31 @@ class F1Scheduler:
         ).astimezone(timezone.utc)
         events = [
             ("weekend", reminder, first, first),
-            ("grid", race.start - timedelta(minutes=30), race.start, race.start),
+            (
+                "grid",
+                race.start - timedelta(minutes=35),
+                race.start - timedelta(minutes=30),
+                race.start,
+            ),
         ]
         delay = timedelta(minutes=self.config.get("result_poll_delay", 5))
         for session in race.sessions:
             end = session.end or session.start + timedelta(
                 minutes=RESULT_DURATIONS[session.key]
             )
+            result_delay = (
+                max(delay, timedelta(minutes=31))
+                if session.key.startswith("practice")
+                or session.key == "sprint_qualifying"
+                else delay
+            )
             events.append(
-                (session.key, end + delay, end + timedelta(hours=48), session.start)
+                (
+                    session.key,
+                    end + result_delay,
+                    end + timedelta(hours=48),
+                    session.start,
+                )
             )
         return events
 

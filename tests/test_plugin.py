@@ -54,11 +54,146 @@ async def plugin(module, tmp_path, monkeypatch):
 class Event:
     unified_msg_origin = "test:GroupMessage:1"
 
+    def is_admin(self):
+        return False
+
     def plain_result(self, text):
         return text
 
     def image_result(self, path):
         return ("image", path)
+
+
+class AdminEvent(Event):
+    def is_admin(self):
+        return True
+
+
+async def test_push_denies_non_admin_before_querying(plugin):
+    plugin.client.schedule = AsyncMock()
+    replies = [r async for r in plugin.f1_push(Event(), "test:GroupMessage:9", "next")]
+    assert "管理员" in replies[0]
+    plugin.client.schedule.assert_not_called()
+    plugin.context.send_message.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "target", ["12345", "test:FriendMessage:9", ":GroupMessage:9", "test:GroupMessage:"]
+)
+async def test_push_rejects_invalid_or_private_target(plugin, target):
+    plugin.client.schedule = AsyncMock()
+    replies = [r async for r in plugin.f1_push(AdminEvent(), target, "next")]
+    assert "群" in replies[0] and "UMO" in replies[0]
+    plugin.client.schedule.assert_not_called()
+    plugin.context.send_message.assert_not_called()
+
+
+async def test_push_sends_to_target_without_changing_subscriptions(plugin):
+    now = datetime.now(timezone.utc)
+    race = Race(
+        now.year,
+        2,
+        "Target weekend",
+        "",
+        "",
+        "",
+        (Session("race", now + timedelta(days=1)),),
+    )
+    plugin.client.schedule = AsyncMock(return_value=[race])
+    target = "other_bot:GroupMessage:999"
+    replies = [r async for r in plugin.f1_push(AdminEvent(), target, "next")]
+    assert "已向" in replies[0] and target in replies[0]
+    sent_target, chain = plugin.context.send_message.call_args.args
+    assert sent_target == target
+    assert "Target weekend" in str(chain)
+    assert plugin.scheduler.subscriber_count == 0
+    assert not plugin.scheduler._state["delivered"]
+
+
+async def test_push_practice_reuses_result_selection(plugin):
+    now = datetime.now(timezone.utc)
+    race = Race(
+        now.year,
+        2,
+        "GP",
+        "",
+        "",
+        "",
+        (
+            Session("practice2", now - timedelta(days=1)),
+            Session("race", now + timedelta(days=1)),
+        ),
+    )
+    plugin.client.schedule = AsyncMock(return_value=[race])
+    plugin.client.results = AsyncMock(
+        return_value=Table("FP2", rows=(("1", "Winner"),))
+    )
+    replies = [
+        r
+        async for r in plugin.f1_push(
+            AdminEvent(), "test:GroupMessage:9", "practice", "2"
+        )
+    ]
+    assert "已向" in replies[0]
+    plugin.client.results.assert_awaited_once_with(race, "practice2")
+
+
+async def test_push_missing_data_does_not_send(plugin):
+    plugin.client.standings = AsyncMock(return_value=None)
+    replies = [
+        r
+        async for r in plugin.f1_push(AdminEvent(), "test:GroupMessage:9", "standings")
+    ]
+    assert "暂无" in replies[0]
+    plugin.context.send_message.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", [False, RuntimeError("offline")])
+async def test_push_reports_delivery_failure(plugin, outcome):
+    plugin.client.standings = AsyncMock(return_value=Table("Standings"))
+    if isinstance(outcome, Exception):
+        plugin.context.send_message.side_effect = outcome
+    else:
+        plugin.context.send_message.return_value = outcome
+    replies = [
+        r
+        async for r in plugin.f1_push(AdminEvent(), "test:GroupMessage:9", "standings")
+    ]
+    assert "失败" in replies[0]
+    assert "已向" not in replies[0]
+
+
+async def test_push_image_failure_falls_back_to_target_text(plugin):
+    plugin.config["enable_image_render"] = True
+    plugin.renderer.render = AsyncMock(side_effect=RuntimeError("render failed"))
+    plugin.client.standings = AsyncMock(return_value=Table("Standings"))
+    target = "test:GroupMessage:9"
+    replies = [r async for r in plugin.f1_push(AdminEvent(), target, "standings")]
+    assert "已向" in replies[0]
+    assert plugin.context.send_message.call_args.args[0] == target
+
+
+@pytest.mark.parametrize(
+    "query,argument",
+    [
+        ("subscribe", ""),
+        ("invalid", ""),
+        ("next", "2"),
+        ("practice", "4"),
+        ("result", "0"),
+    ],
+)
+async def test_push_rejects_invalid_queries_before_send(plugin, query, argument):
+    plugin.client.schedule = AsyncMock()
+    replies = [
+        r
+        async for r in plugin.f1_push(
+            AdminEvent(), "test:GroupMessage:9", query, argument
+        )
+    ]
+    assert replies
+    plugin.client.schedule.assert_not_called()
+    plugin.context.send_message.assert_not_called()
 
 
 async def test_initialize_uses_real_astrbot_api_and_restores_state(plugin):

@@ -15,6 +15,16 @@ SESSION_NAMES = {
     "race": "正赛",
 }
 
+RESULT_DURATIONS = {
+    "practice1": 60,
+    "practice2": 60,
+    "practice3": 60,
+    "sprint_qualifying": 60,
+    "qualifying": 90,
+    "sprint": 90,
+    "race": 180,
+}
+
 
 def parse_datetime(value: str) -> datetime:
     """Parse an explicit timestamp without guessing a missing timezone.

@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.0] - 2026-10-31
+
+- Add administrator-only `/f1 push <group UMO> <query> [argument]` for one-time schedule, result, and standings delivery to a specified group, with image-to-text fallback and explicit delivery status.
+- Reuse existing query validation without changing subscriptions or automatic notification acknowledgements; reject non-administrators and private-chat targets.
+- Skip OpenF1 network requests during every known session's live window, from 30 minutes before the start through 30 minutes after the end, including both boundaries; retain cached responses and use confirmed timing where available.
+- Wait at least 31 minutes before polling practice and sprint-qualifying results. Move starting-grid polling from 30 minutes before the race to the interval between 35 and 30 minutes before the race; unpublished grids may not be delivered before the race.
+- Log unavailable OpenF1 timing only once per season and round per plugin instance, including repeated failures after recovery.
+- Document query-window behavior and administrator push commands in the README, settings, and command help.
+
 ## [2.0.2] - 2026-10-30
 
 - Use the logger provided by `astrbot.api` throughout the plugin to comply with plugin review requirements.

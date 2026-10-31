@@ -40,6 +40,29 @@ def setup_scheduler():
     return scheduler, client, send, store, now
 
 
+def test_openf1_events_outside_live_window(setup_scheduler):
+    scheduler, _, _, _, now = setup_scheduler
+    race = Race(
+        2026,
+        2,
+        "China",
+        "",
+        "",
+        "",
+        (
+            Session(
+                "practice1",
+                now - timedelta(days=2),
+                now - timedelta(days=2) + timedelta(hours=1),
+            ),
+            Session("race", now),
+        ),
+    )
+    events = {kind: (due, expires) for kind, due, expires, _ in scheduler._events(race)}
+    assert events["grid"] == (now - timedelta(minutes=35), now - timedelta(minutes=30))
+    assert events["practice1"][0] == race.sessions[0].end + timedelta(minutes=31)
+
+
 async def test_initialize_loads_subscriptions_before_commands(setup_scheduler):
     scheduler, _, _, store, now = setup_scheduler
     await scheduler.initialize(now)

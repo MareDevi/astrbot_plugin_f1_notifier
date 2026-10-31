@@ -32,8 +32,10 @@ HELP_TEXT = """F1 Notifier
 /f1 subscribe — 订阅当前会话
 /f1 unsubscribe — 取消当前会话订阅
 /f1 test [season] — 只读检查数据源，默认 2025
+/f1 push <群UMO> <next|schedule|result|qualifying|sprint|practice|standings> [参数] — 管理员定向推送
 
-订阅推送：比赛周指定星期与时间的周末赛程、各节练习赛 / 排位赛 / 冲刺赛结果、正赛前 30 分钟发车顺序、正赛结果。
+订阅推送：比赛周指定星期与时间的周末赛程、各节练习赛 / 排位赛 / 冲刺赛结果、正赛前 35 至 30 分钟已发布的发车顺序、正赛结果。
+OpenF1 查询避开场次开始前 30 分钟至结束后 30 分钟；练习赛和冲刺排位赛结果至少等待结束后 31 分钟。
 周末赛程默认周一 09:00，可在插件设置中选择周一 / 周二 / 周三及时间。
 时间默认 Asia/Shanghai。结果在数据源发布后推送，可能延迟。
 """
@@ -148,7 +150,11 @@ class F1NotifierPlugin(Star):
         )
 
     async def _reply(
-        self, event: AstrMessageEvent, action: str, argument: str = "last"
+        self,
+        event: AstrMessageEvent,
+        action: str,
+        argument: str = "last",
+        target: str | None = None,
     ):
         """Validate a query and render its result using the selected output mode.
 
@@ -156,6 +162,7 @@ class F1NotifierPlugin(Star):
             event: Triggering message event.
             action: Query or subscription operation.
             argument: Optional command-specific user argument.
+            target: Optional group UMO for an administrator's one-time push.
 
         Yields:
             An AstrBot text or image message result.
@@ -259,6 +266,18 @@ class F1NotifierPlugin(Star):
             if table is None:
                 yield event.plain_result(
                     "暂无已发布数据。赛程或结果可能尚未公布，请稍后重试。"
+                )
+                return
+            if target is not None:
+                try:
+                    sent = await self._send(target, table)
+                except Exception:
+                    logger.exception("F1 proactive delivery failed for %s", target)
+                    sent = False
+                yield event.plain_result(
+                    f"已向 {target} 推送。"
+                    if sent
+                    else "主动推送失败，请检查平台连接、目标群 UMO 和机器人发言权限。"
                 )
                 return
             if self.config.get("enable_image_render"):
@@ -411,6 +430,61 @@ class F1NotifierPlugin(Star):
             Subscription status.
         """
         async for result in self._reply(event, "unsubscribe"):
+            yield result
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @f1.command("push")
+    async def f1_push(
+        self,
+        event: AstrMessageEvent,
+        target: str = "",
+        query: str = "next",
+        argument: str = "",
+    ):
+        """Send one F1 query to a group without changing delivery state.
+
+        Args:
+            event: Administrator's triggering message.
+            target: Full group UMO, including the platform instance ID.
+            query: Existing F1 query type.
+            argument: Optional round, practice number, or standings category.
+
+        Yields:
+            Validation, query, or delivery status for the administrator.
+        """
+        if not event.is_admin():
+            yield event.plain_result("仅 AstrBot 管理员可以定向推送。")
+            return
+        parts = target.split(":", 2)
+        if (
+            len(parts) != 3
+            or parts[1] != "GroupMessage"
+            or not parts[0].strip()
+            or not parts[2].strip()
+            or any(char.isspace() for char in target)
+        ):
+            yield event.plain_result(
+                "请提供目标群完整 UMO：平台实例ID:GroupMessage:群ID，可在目标群通过 /sid 获取。"
+            )
+            return
+        action = {
+            "next": "next",
+            "schedule": "schedule",
+            "result": "race",
+            "qualifying": "qualifying",
+            "sprint": "sprint",
+            "practice": "practice",
+            "standings": "standings",
+        }.get(query.lower())
+        if action is None or (action in ("next", "schedule") and argument):
+            yield event.plain_result(
+                "用法：/f1 push <群UMO> <next|schedule|result|qualifying|sprint|practice|standings> [参数]"
+            )
+            return
+        argument = argument or {"practice": "1", "standings": "drivers"}.get(
+            action, "last"
+        )
+        async for result in self._reply(event, action, argument, target=target):
             yield result
 
     @f1.command("test")

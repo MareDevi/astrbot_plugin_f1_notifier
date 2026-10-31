@@ -14,7 +14,14 @@ from typing import Any
 import aiohttp
 from astrbot.api import logger
 
-from .models import SESSION_NAMES, Race, Session, Table, parse_datetime
+from .models import (
+    RESULT_DURATIONS,
+    SESSION_NAMES,
+    Race,
+    Session,
+    Table,
+    parse_datetime,
+)
 
 OPENF1_NAMES = {
     "practice1": "Practice 1",
@@ -55,6 +62,9 @@ class F1Client:
         self._locks: dict[str, asyncio.Lock] = {}
         self._next_request: dict[str, float] = {}
         self._retry_at: dict[str, float] = {}
+        self._known_races: dict[str, Race] = {}
+        self._confirmed_sessions: dict[tuple[str, str], Session] = {}
+        self._timing_warnings: set[str] = set()
 
     async def open(self) -> None:
         """Open one reusable connection pool during plugin initialization."""
@@ -73,6 +83,8 @@ class F1Client:
             await self._session.close()
             self._session = None
         self._cache.clear()
+        self._known_races.clear()
+        self._confirmed_sessions.clear()
 
     async def _get(
         self, base: str, path: str, params: dict | None = None, ttl: float = 30
@@ -101,6 +113,25 @@ class F1Client:
             if self._retry_at.get(base, 0) > now:
                 raise RateLimitError("数据源限流，请稍后重试。")
             await asyncio.sleep(max(0, self._next_request.get(base, 0) - now))
+            if base == self.openf1_base:
+                # Check after pacing too: queued requests can cross the live boundary.
+                current = datetime.now(timezone.utc)
+                slots = [
+                    self._confirmed_sessions.get((race.key, slot.key), slot)
+                    for race in self._known_races.values()
+                    for slot in race.sessions
+                ]
+                if any(
+                    slot.start - timedelta(minutes=30)
+                    <= current
+                    <= (
+                        slot.end
+                        or slot.start + timedelta(minutes=RESULT_DURATIONS[slot.key])
+                    )
+                    + timedelta(minutes=30)
+                    for slot in slots
+                ):
+                    return []
             if self._session is None or self._session.closed:
                 raise DataError("数据客户端尚未就绪，请稍后重试。")
             # OpenF1's public tier permits 30 requests/minute. Pace all callers,
@@ -182,6 +213,7 @@ class F1Client:
         # Jolpica supplies official round identities. OpenF1 can supply more
         # precise starts and ends without guessing rounds from meeting order.
         if season >= 2023 and races:
+            self._known_races.update((race.key, race) for race in races)
             try:
                 timings = await self._get(
                     self.openf1_base, "/sessions", {"year": season}, ttl=300
@@ -189,7 +221,20 @@ class F1Client:
             except RateLimitError:
                 timings = []
             except DataError:
-                logger.warning("OpenF1 timing unavailable; keeping published schedule")
+                current = datetime.now(timezone.utc)
+                weekend = min(
+                    races,
+                    key=lambda race: min(
+                        abs((slot.start - current).total_seconds())
+                        for slot in race.sessions
+                    ),
+                )
+                if weekend.key not in self._timing_warnings:
+                    self._timing_warnings.add(weekend.key)
+                    logger.warning(
+                        "OpenF1 timing unavailable; keeping published schedule for %s",
+                        weekend.key,
+                    )
                 timings = []
             if isinstance(timings, list):
                 updated = []
@@ -233,6 +278,10 @@ class F1Client:
                         )
                     )
                 races = updated
+                for race in races:
+                    for slot in race.sessions:
+                        if slot.end is not None:
+                            self._confirmed_sessions[(race.key, slot.key)] = slot
         return sorted(races, key=lambda race: race.start)
 
     async def openf1_session(self, race: Race, kind: str) -> dict | None:
@@ -251,6 +300,7 @@ class F1Client:
         slot = next((s for s in race.sessions if s.key == kind), None)
         if slot is None or race.season < 2023:
             return None
+        self._known_races[race.key] = race
         names = {OPENF1_NAMES[kind]}
         if kind == "sprint_qualifying":
             names.add("Sprint Shootout")
@@ -278,7 +328,20 @@ class F1Client:
                     candidates.append((delta, row))
             except (KeyError, ValueError, TypeError):
                 continue
-        return min(candidates, key=lambda item: item[0])[1] if candidates else None
+        if not candidates:
+            return None
+        matched = min(candidates, key=lambda item: item[0])[1]
+        if matched.get("date_end"):
+            try:
+                start = parse_datetime(matched["date_start"])
+                end = parse_datetime(matched["date_end"])
+                if end > start:
+                    self._confirmed_sessions[(race.key, kind)] = Session(
+                        kind, start, end
+                    )
+            except (ValueError, TypeError):
+                pass
+        return matched
 
     async def results(self, race: Race, kind: str) -> Table | None:
         """Read results for an exact season, round, and session.

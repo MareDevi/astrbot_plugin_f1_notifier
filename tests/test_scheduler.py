@@ -71,6 +71,19 @@ async def test_initialize_loads_subscriptions_before_commands(setup_scheduler):
     assert store["f1_v2_state"]["version"] == 2
 
 
+async def test_subscriptions_returns_sorted_snapshot(setup_scheduler):
+    scheduler, _, _, _, now = setup_scheduler
+    await scheduler.initialize(now)
+    items = await scheduler.subscriptions()
+    assert [origin for origin, _ in items] == [
+        "one:GroupMessage:1",
+        "two:GroupMessage:2",
+    ]
+    assert all(since.tzinfo is not None for _, since in items)
+    items.clear()
+    assert scheduler.subscriber_count == 2
+
+
 async def test_failed_recipient_retries_without_resending_success(setup_scheduler):
     scheduler, _, send, _, now = setup_scheduler
     await scheduler.initialize(now)

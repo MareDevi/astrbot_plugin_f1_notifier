@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1] - 2026-11-01
+
+- Add administrator-only `/f1 subs`, `/f1 subs add <UMO>`, and `/f1 subs remove <UMO>` to list, create, and remove subscriptions for any group or private conversation without operating inside it.
+- Show conversation type and subscription start time in the configured timezone; derive both actions from the stored scheduler state so each mutation is persisted before it becomes visible.
+- Reuse strict UMO validation for administrator commands and reuse it in `/f1 push`, which still accepts group chats only.
+- Document the administrator subscription commands and update command help.
+
 ## [2.1.0] - 2026-10-31
 
 - Add administrator-only `/f1 push <group UMO> <query> [argument]` for one-time schedule, result, and standings delivery to a specified group, with image-to-text fallback and explicit delivery status.

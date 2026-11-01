@@ -1,7 +1,7 @@
 name: astrbot_plugin_f1_notifier
 display_name: F1 Notifier
 desc: F1 赛程、练习赛、排位赛、冲刺赛、正赛与积分榜查询，支持可靠订阅推送及图片卡片
-version: 2.1.0
+version: 2.1.1
 author: MareDevi
 repo: https://github.com/MareDevi/astrbot_plugin_f1_notifier
 astrbot_version: ">=4.29.3,<5"

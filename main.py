@@ -33,12 +33,36 @@ HELP_TEXT = """F1 Notifier
 /f1 unsubscribe — 取消当前会话订阅
 /f1 test [season] — 只读检查数据源，默认 2025
 /f1 push <群UMO> <next|schedule|result|qualifying|sprint|practice|standings> [参数] — 管理员定向推送
+/f1 subs — 管理员：列出全部订阅会话
+/f1 subs add <会话UMO> — 管理员：添加订阅
+/f1 subs remove <会话UMO> — 管理员：取消订阅
 
 订阅推送：比赛周指定星期与时间的周末赛程、各节练习赛 / 排位赛 / 冲刺赛结果、正赛前 35 至 30 分钟已发布的发车顺序、正赛结果。
 OpenF1 查询避开场次开始前 30 分钟至结束后 30 分钟；练习赛和冲刺排位赛结果至少等待结束后 31 分钟。
 周末赛程默认周一 09:00，可在插件设置中选择周一 / 周二 / 周三及时间。
 时间默认 Asia/Shanghai。结果在数据源发布后推送，可能延迟。
 """
+
+
+def _parse_umo(value: str) -> tuple[str, str, str] | None:
+    """Split a unified message origin without guessing missing fields.
+
+    Args:
+        value: Candidate ``platform:message_type:session`` string.
+
+    Returns:
+        The three components, or None if the value is not a supported UMO.
+    """
+    parts = value.split(":", 2)
+    if (
+        len(parts) != 3
+        or parts[1] not in ("GroupMessage", "FriendMessage")
+        or not parts[0].strip()
+        or not parts[2].strip()
+        or any(char.isspace() for char in value)
+    ):
+        return None
+    return parts[0], parts[1], parts[2]
 
 
 class F1NotifierPlugin(Star):
@@ -455,14 +479,8 @@ class F1NotifierPlugin(Star):
         if not event.is_admin():
             yield event.plain_result("仅 AstrBot 管理员可以定向推送。")
             return
-        parts = target.split(":", 2)
-        if (
-            len(parts) != 3
-            or parts[1] != "GroupMessage"
-            or not parts[0].strip()
-            or not parts[2].strip()
-            or any(char.isspace() for char in target)
-        ):
+        parsed = _parse_umo(target)
+        if parsed is None or parsed[1] != "GroupMessage":
             yield event.plain_result(
                 "请提供目标群完整 UMO：平台实例ID:GroupMessage:群ID，可在目标群通过 /sid 获取。"
             )
@@ -486,6 +504,74 @@ class F1NotifierPlugin(Star):
         )
         async for result in self._reply(event, action, argument, target=target):
             yield result
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @f1.command("subs")
+    async def f1_subs(
+        self, event: AstrMessageEvent, action: str = "list", target: str = ""
+    ):
+        """List, add, or remove subscriptions for any conversation.
+
+        Args:
+            event: Administrator's triggering message.
+            action: list, add, or remove; defaults to list.
+            target: Full UMO for add and remove.
+
+        Yields:
+            Subscription inventory or mutation status.
+        """
+        if not event.is_admin():
+            yield event.plain_result("仅 AstrBot 管理员可以管理订阅。")
+            return
+        if not self._ready:
+            yield event.plain_result("插件尚未就绪，请稍后重试。")
+            return
+        usage = (
+            "用法：/f1 subs [list] | /f1 subs add <会话UMO> | /f1 subs remove <会话UMO>"
+        )
+        try:
+            action = action.lower()
+            if action == "list" and not target:
+                subscriptions = await self.scheduler.subscriptions()
+                if not subscriptions:
+                    yield event.plain_result("当前没有订阅的会话。")
+                    return
+                timezone = ZoneInfo(self.config["timezone"])
+                lines = [
+                    f"已订阅会话（{len(subscriptions)}，时区 {self.config['timezone']}）："
+                ]
+                for index, (origin, since) in enumerate(subscriptions, 1):
+                    parts = _parse_umo(origin)
+                    if parts is None:
+                        kind = "会话"
+                    elif parts[1] == "FriendMessage":
+                        kind = "私聊"
+                    else:
+                        kind = "群聊"
+                    local_since = since.astimezone(timezone).strftime("%Y-%m-%d %H:%M")
+                    lines.append(f"{index}. [{kind}] {origin} — {local_since}")
+                yield event.plain_result("\n".join(lines))
+                return
+            if action in ("add", "remove") and _parse_umo(target) is not None:
+                if action == "add":
+                    added = await self.scheduler.subscribe(target)
+                    yield event.plain_result(
+                        f"已添加订阅：{target}。"
+                        if added
+                        else f"该会话已订阅：{target}。"
+                    )
+                else:
+                    removed = await self.scheduler.unsubscribe(target)
+                    yield event.plain_result(
+                        f"已取消订阅：{target}。"
+                        if removed
+                        else f"该会话尚未订阅：{target}。"
+                    )
+                return
+            yield event.plain_result(usage)
+        except Exception:
+            logger.exception("F1 subscription management failed")
+            yield event.plain_result("订阅管理失败，请查看插件日志。")
 
     @f1.command("test")
     async def f1_test(self, event: AstrMessageEvent, season: str = "2025"):

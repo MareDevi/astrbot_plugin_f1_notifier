@@ -196,6 +196,89 @@ async def test_push_rejects_invalid_queries_before_send(plugin, query, argument)
     plugin.context.send_message.assert_not_called()
 
 
+async def test_subs_denies_non_admin_without_changing_state(plugin):
+    plugin.scheduler.subscribe = AsyncMock()
+    plugin.scheduler.unsubscribe = AsyncMock()
+    for action, target in (
+        ("list", ""),
+        ("add", "x:GroupMessage:1"),
+        ("remove", "x:GroupMessage:1"),
+    ):
+        replies = [r async for r in plugin.f1_subs(Event(), action, target)]
+        assert "管理员" in replies[0]
+    plugin.scheduler.subscribe.assert_not_called()
+    plugin.scheduler.unsubscribe.assert_not_called()
+    assert plugin.scheduler.subscriber_count == 0
+
+
+async def test_subs_lists_local_subscription_times(plugin):
+    await plugin.scheduler.subscribe(
+        "bot:GroupMessage:1", datetime(2026, 3, 15, 10, tzinfo=timezone.utc)
+    )
+    await plugin.scheduler.subscribe(
+        "bot:FriendMessage:2", datetime(2026, 3, 15, 11, tzinfo=timezone.utc)
+    )
+    replies = [r async for r in plugin.f1_subs(AdminEvent())]
+    text = replies[0]
+    assert "bot:GroupMessage:1" in text and "[群聊]" in text
+    assert "bot:FriendMessage:2" in text and "[私聊]" in text
+    assert "2026-03-15 18:00" in text
+    assert "2026-03-15 19:00" in text
+
+
+async def test_subs_reports_empty_inventory(plugin):
+    replies = [r async for r in plugin.f1_subs(AdminEvent(), "list")]
+    assert "没有订阅" in replies[0]
+
+
+async def test_subs_adds_and_removes_explicit_umo(plugin):
+    target = "other_bot:GroupMessage:999"
+    replies = [r async for r in plugin.f1_subs(AdminEvent(), "add", target)]
+    assert "已添加" in replies[0] and target in replies[0]
+    assert plugin.scheduler.subscriber_count == 1
+    replies = [r async for r in plugin.f1_subs(AdminEvent(), "add", target)]
+    assert "已订阅" in replies[0]
+    assert plugin.scheduler.subscriber_count == 1
+    replies = [r async for r in plugin.f1_subs(AdminEvent(), "remove", target)]
+    assert "已取消" in replies[0] and target in replies[0]
+    assert plugin.scheduler.subscriber_count == 0
+    replies = [r async for r in plugin.f1_subs(AdminEvent(), "remove", target)]
+    assert "尚未订阅" in replies[0]
+
+
+async def test_subs_manages_private_conversations(plugin):
+    target = "bot:FriendMessage:42"
+    replies = [r async for r in plugin.f1_subs(AdminEvent(), "add", target)]
+    assert "已添加" in replies[0]
+    assert await plugin.scheduler.subscriptions()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "",
+        "12345",
+        ":GroupMessage:9",
+        "bot:GroupMessage:",
+        "bot:OtherMessage:9",
+        "bot:GroupMessage:9 9",
+    ],
+)
+async def test_subs_rejects_invalid_umo(plugin, target):
+    plugin.scheduler.subscribe = AsyncMock()
+    plugin.scheduler.unsubscribe = AsyncMock()
+    for action in ("add", "remove"):
+        replies = [r async for r in plugin.f1_subs(AdminEvent(), action, target)]
+        assert "用法" in replies[0]
+    plugin.scheduler.subscribe.assert_not_called()
+    plugin.scheduler.unsubscribe.assert_not_called()
+
+
+async def test_subs_rejects_unknown_action(plugin):
+    replies = [r async for r in plugin.f1_subs(AdminEvent(), "rename", "x")]
+    assert "用法" in replies[0]
+
+
 async def test_initialize_uses_real_astrbot_api_and_restores_state(plugin):
     assert plugin.scheduler.subscriber_count == 0
     assert plugin.client._session is not None

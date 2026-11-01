@@ -149,6 +149,23 @@ class F1Scheduler:
             self._state = state
             return True
 
+    async def subscriptions(self) -> list[tuple[str, datetime]]:
+        """Return a stable snapshot of subscribed origins and their start times.
+
+        Returns:
+            Origins sorted lexicographically with parsed subscription times.
+
+        Raises:
+            RuntimeError: If initialization has not completed.
+        """
+        if not self._ready:
+            raise RuntimeError("Scheduler is not initialized")
+        async with self._lock:
+            return [
+                (origin, parse_datetime(since))
+                for origin, since in sorted(self._state["subscribers"].items())
+            ]
+
     def start(self) -> None:
         """Start a single polling task after state restoration.
 
